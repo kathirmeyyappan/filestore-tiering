@@ -8,7 +8,7 @@ on:
 
 jobs:
   check:
-    name: Clippy & Fmt
+    name: Cargo fmt, clippy, & test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -26,3 +26,6 @@ jobs:
 
       - name: Run clippy
         run: cargo clippy -- -D warnings
+
+      - name: Run tests
+        run: cargo test
