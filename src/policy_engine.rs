@@ -26,7 +26,10 @@ pub struct AccessEvent {
 pub trait PolicyEngine {
     /// Validate that (hot, cold_storage) is acceptable for this policy.
     /// Called before construction; return `Err` to reject (e.g. wrong number of tiers).
-    fn validate_config(_hot: &Path, _cold_storage: &[PathBuf]) -> Result<(), Box<dyn Error + Send + Sync>>
+    fn validate_config(
+        _hot: &Path,
+        _cold_storage: &[PathBuf],
+    ) -> Result<(), Box<dyn Error + Send + Sync>>
     where
         // so that we can only call on concrete type (dyn PolicyEngine)
         Self: Sized,

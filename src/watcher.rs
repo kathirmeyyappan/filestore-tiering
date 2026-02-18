@@ -14,7 +14,6 @@ pub struct FsWatcher {
 }
 
 impl FsWatcher {
-
     /// Initialize on 'dir', and begin watching it for file-access events.
     pub fn new(dir: &Path) -> Result<Self> {
         let (tx, rx) = mpsc::channel();

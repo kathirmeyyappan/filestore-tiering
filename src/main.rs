@@ -1,5 +1,5 @@
-mod policy_engine;
 mod policies;
+mod policy_engine;
 mod watcher;
 
 use std::path::PathBuf;
@@ -62,7 +62,9 @@ fn main() -> Result<()> {
             // log::info!("observed {} access events", events.len());
         }
         policy_engine.ingest(&events);
-        policy_engine.reorganize().map_err(|e| anyhow::anyhow!("{}", e))?;
+        policy_engine
+            .reorganize()
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
     }
 }
 
@@ -84,7 +86,8 @@ fn make_policy(
     let to_err = |e: Box<dyn std::error::Error + Send + Sync>| anyhow::anyhow!("{}", e);
     match name {
         "dummy" => {
-            policies::dummy::DummyPolicy::validate_config(hot_storage, cold_storage).map_err(to_err)?;
+            policies::dummy::DummyPolicy::validate_config(hot_storage, cold_storage)
+                .map_err(to_err)?;
             Ok(Box::new(policies::dummy::DummyPolicy::new(
                 hot_storage.to_path_buf(),
                 cold_storage.to_vec(),

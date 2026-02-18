@@ -9,12 +9,18 @@ pub struct DummyPolicy {
 
 impl DummyPolicy {
     pub fn new(hot_storage: PathBuf, cold_storage: Vec<PathBuf>) -> Self {
-        Self { hot_storage, cold_storage }
+        Self {
+            hot_storage,
+            cold_storage,
+        }
     }
 }
 
 impl PolicyEngine for DummyPolicy {
-    fn validate_config(_hot: &Path, cold_storage: &[std::path::PathBuf]) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    fn validate_config(
+        _hot: &Path,
+        cold_storage: &[std::path::PathBuf],
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         if cold_storage.is_empty() {
             return Err("dummy policy requires at least one cold_storage tier".into());
         }
