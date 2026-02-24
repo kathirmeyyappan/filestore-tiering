@@ -33,6 +33,30 @@ impl PolicyEngine for DummyPolicy {
 
     fn reorganize(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         log::info!("[dummy policy] reorganize called");
+
+        // Example: evict a file from hot storage into the first cold tier.
+        // (real policies would decide *which* logical paths to evict.)
+        //
+        // use crate::tier_fs::evict_to_tier;
+        //
+        // let logical_path = self.hot_storage.join("some/relative/path");
+        // let first_cold_tier = &self.cold_storage[0];
+        // evict_to_tier(
+        //     &self.hot_storage,
+        //     &logical_path,
+        //     first_cold_tier,
+        // )?;
+        //
+        // Example: promote a file back into hot storage from any tier.
+        //
+        // use crate::tier_fs::promote_to_hot;
+        //
+        // let logical_path = self.hot_storage.join("some/relative/path");
+        // promote_to_hot(
+        //     &self.hot_storage,
+        //     &logical_path,
+        // )?;
+
         Ok(())
     }
 }
