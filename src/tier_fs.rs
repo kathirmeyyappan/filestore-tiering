@@ -4,9 +4,7 @@ use std::io;
 use std::os::unix::fs as unix_fs;
 use std::path::{Path, PathBuf};
 
-/// Move the backing data for `logical` into `target_root`, preserving the
-/// logical path at `logical` by recreating it as a symlink to the new
-/// backing location.
+/// Evict data from the hot tier into a colder tier.
 ///
 /// Intuition:
 /// - Callers think in terms of **\"pointer path\" + \"target dir\"**.
@@ -18,12 +16,10 @@ use std::path::{Path, PathBuf};
 /// - Given `hot_root = /hot` and `logical = /hot/a/b`, we strip the prefix
 ///   to get `rel = a/b`, then store the backing at `/cold/a/b`.
 ///
-/// Summary:
-/// - All reads/writes go through `logical` (the hot path).
-/// - This helper just moves the underlying bytes and rewires `logical`
-///   to point at the new backing path while mirroring the directory
-///   structure from `hot_root` under `target_root`.
-pub fn move_logical_to_dir(
+/// After eviction:
+/// - All reads/writes still go through `logical` (the hot path).
+/// - The entry at `logical` is a symlink pointing into `target_root`.
+pub fn evict_to_tier(
     hot_root: &Path,
     logical: &Path,
     target_root: &Path,
@@ -71,6 +67,66 @@ pub fn move_logical_to_dir(
     }
 
     unix_fs::symlink(&target_backing, logical)?;
+
+    Ok(())
+}
+
+/// Promote data back into the hot tier.
+///
+/// Intuition:
+/// - `logical` is still the client-facing path under `hot_root`.
+/// - The current backing may live in some colder tier (e.g. `/cold/a/b`).
+/// - After promotion, the bytes live directly at `logical` again, and
+///   `logical` is a regular file (not a symlink).
+pub fn promote_to_hot(
+    hot_root: &Path,
+    logical: &Path,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let _rel = logical
+        .strip_prefix(hot_root)
+        .map_err(|_| format!("logical path {logical:?} is not under hot root {hot_root:?}"))?;
+
+    let meta = fs::symlink_metadata(logical).map_err(|e| match e.kind() {
+        io::ErrorKind::NotFound => format!("logical path {logical:?} does not exist"),
+        _ => e.to_string(),
+    })?;
+
+    // If it's already a regular file at the logical path, nothing to do.
+    if meta.is_file() && !meta.file_type().is_symlink() {
+        return Ok(());
+    }
+
+    let current_backing = if meta.file_type().is_symlink() {
+        let target = fs::read_link(logical)?;
+        if target.is_absolute() {
+            target
+        } else {
+            logical
+                .parent()
+                .unwrap_or_else(|| Path::new("/"))
+                .join(target)
+        }
+    } else {
+        // Unexpected type (e.g. directory); bail.
+        return Err(format!("logical path {logical:?} is not a file or symlink").into());
+    };
+
+    // We want the bytes to end up directly at `logical`.
+    if current_backing == logical {
+        // Already there (self-consistent), so nothing to do.
+        return Ok(());
+    }
+
+    if let Some(parent) = logical.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    // Remove the symlink at `logical` so we can rename into place.
+    if meta.file_type().is_symlink() {
+        fs::remove_file(logical)?;
+    }
+
+    fs::rename(&current_backing, logical)?;
 
     Ok(())
 }
