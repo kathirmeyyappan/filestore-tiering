@@ -1,5 +1,6 @@
 mod policies;
 mod policy_engine;
+mod tier_fs;
 mod watcher;
 
 use std::path::PathBuf;
