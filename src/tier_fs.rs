@@ -44,6 +44,7 @@ use std::path::{Path, PathBuf};
 /// // Promote to hot: put backing at the canonical path → /hot/a/b is now a regular file
 /// move_to_tier(hot, &hot.join("a/b"), hot)?;
 /// ```
+#[allow(dead_code)]
 pub fn move_to_tier(
     hot_root: &Path,
     hot_path: &Path,
