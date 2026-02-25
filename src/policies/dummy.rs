@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use crate::policy_engine::{AccessEvent, PolicyEngine};
 
 #[allow(dead_code)]
+#[derive(Debug)]
 pub struct DummyPolicy {
     pub hot_storage: PathBuf,
     pub cold_storage: Vec<PathBuf>,

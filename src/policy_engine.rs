@@ -14,6 +14,7 @@ pub enum FsEventKind {
 
 /// A single filesystem event observed by the watcher.
 #[allow(dead_code)]
+#[derive(Debug)]
 pub struct AccessEvent {
     pub path: PathBuf,
     pub kind: FsEventKind,
