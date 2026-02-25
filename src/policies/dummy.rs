@@ -102,14 +102,14 @@ impl PolicyEngine for DummyPolicy {
     /// ```
     fn reorganize(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         log::info!("[dummy policy] reorganize called");
-        // Example eviction: 
-        // 
+        // Example eviction:
+        //
         // let hot_path = self.tier_state.hot_root().join("some/file");
         //               if let Some(cold) = self.tier_state.cold_root(0) {
         //                   let _n = self.tier_state.move_to_tier(&hot_path, cold)?;
         //               }
-        // 
-        // Example promotion: 
+        //
+        // Example promotion:
         //
         // self.tier_state.move_to_tier(&hot_path, self.tier_state.hot_root())?;
         Ok(())

@@ -33,15 +33,8 @@ impl TierState {
         cold_capacities: Vec<u64>,
     ) -> Self {
         let n = cold_roots.len();
-        let cap_len = cold_capacities.len();
-        let cold_capacities: Vec<u64> = if cap_len >= n {
-            cold_capacities
-        } else {
-            cold_capacities
-                .into_iter()
-                .chain(std::iter::repeat(u64::MAX).take(n.saturating_sub(cap_len)))
-                .collect()
-        };
+        let mut cold_capacities = cold_capacities;
+        cold_capacities.resize(n, u64::MAX);
         Self {
             hot_root,
             cold_roots,
@@ -139,7 +132,11 @@ impl TierState {
             if let Some(i) = cold_source_i {
                 self.cold_bytes[i] = self.cold_bytes[i].saturating_sub(size);
             }
-        } else if let Some(i) = self.cold_roots.iter().position(|r| r.as_path() == target_dir) {
+        } else if let Some(i) = self
+            .cold_roots
+            .iter()
+            .position(|r| r.as_path() == target_dir)
+        {
             self.hot_bytes = self.hot_bytes.saturating_sub(size);
             self.cold_bytes[i] += size;
         }

@@ -44,7 +44,12 @@ fn parse_capacity(s: &str) -> Result<u64, String> {
         "Mi" | "mi" => 1024 * 1024,
         "Gi" | "gi" => 1024 * 1024 * 1024,
         "Ti" | "ti" => 1024 * 1024 * 1024 * 1024,
-        _ => return Err(format!("unknown unit: {:?} (use K, M, G, T or Ki, Mi, Gi, Ti)", unit)),
+        _ => {
+            return Err(format!(
+                "unknown unit: {:?} (use K, M, G, T or Ki, Mi, Gi, Ti)",
+                unit
+            ));
+        }
     };
     num.checked_mul(multiplier)
         .ok_or_else(|| format!("capacity overflow: {} {}", num, unit))
@@ -55,7 +60,9 @@ use crate::watcher::FsWatcher;
 
 #[derive(Parser)]
 #[command(about = "Storage tiering via access-aware local file migration")]
-#[command(after_help = "Capacity format: plain bytes, or 1K/1M/1G/1T (decimal), 1Ki/1Mi/1Gi/1Ti (binary), or \"unlimited\". Cold tier order: first cold-storage path = warmest (index 0). Example: --hot-storage /hot -c /warm /cold --hot-capacity 1G --cold-capacities 500M 2G --policy dummy")]
+#[command(
+    after_help = "Capacity format: plain bytes, or 1K/1M/1G/1T (decimal), 1Ki/1Mi/1Gi/1Ti (binary), or \"unlimited\". Cold tier order: first cold-storage path = warmest (index 0). Example: --hot-storage /hot -c /warm /cold --hot-capacity 1G --cold-capacities 500M 2G --policy dummy"
+)]
 struct Cli {
     /// Path to the hot (client-facing) directory to watch.
     #[arg(long, short = 'H', required = true)]
