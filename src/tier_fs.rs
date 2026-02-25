@@ -106,3 +106,92 @@ pub fn move_to_tier(
 
     Ok(())
 }
+
+#[cfg(test)]
+#[cfg(unix)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn setup_hot_cold() -> (tempfile::TempDir, tempfile::TempDir) {
+        let hot = tempfile::tempdir().unwrap();
+        let cold = tempfile::tempdir().unwrap();
+        (hot, cold)
+    }
+
+    #[test]
+    fn evict_file_from_hot_to_cold() {
+        let (hot_dir, cold_dir) = setup_hot_cold();
+        let hot_root = hot_dir.path();
+        let cold_root = cold_dir.path();
+
+        // Create file at hot/a/b
+        let hot_path = hot_root.join("a/b");
+        fs::create_dir_all(hot_path.parent().unwrap()).unwrap();
+        fs::write(&hot_path, b"hello tier").unwrap();
+
+        move_to_tier(hot_root, &hot_path, cold_root).unwrap();
+
+        // hot/a/b should be a symlink to cold/a/b
+        assert!(fs::symlink_metadata(&hot_path).unwrap().file_type().is_symlink());
+        let target = fs::read_link(&hot_path).unwrap();
+        assert_eq!(target, cold_root.join("a/b"));
+        // Content should be in cold
+        assert_eq!(fs::read_to_string(cold_root.join("a/b")).unwrap(), "hello tier");
+        // Reading via hot path should still work (follows symlink)
+        assert_eq!(fs::read_to_string(&hot_path).unwrap(), "hello tier");
+    }
+
+    #[test]
+    fn promote_from_cold_back_to_hot() {
+        let (hot_dir, cold_dir) = setup_hot_cold();
+        let hot_root = hot_dir.path();
+        let cold_root = cold_dir.path();
+
+        // Start with file in cold, symlink at hot
+        fs::create_dir_all(cold_root.join("a").as_path()).unwrap();
+        fs::write(cold_root.join("a/b"), b"cold content").unwrap();
+        let hot_path = hot_root.join("a/b");
+        fs::create_dir_all(hot_path.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(cold_root.join("a/b"), &hot_path).unwrap();
+
+        move_to_tier(hot_root, &hot_path, hot_root).unwrap();
+
+        // hot/a/b should now be a regular file with the content
+        assert!(!fs::symlink_metadata(&hot_path).unwrap().file_type().is_symlink());
+        assert_eq!(fs::read_to_string(&hot_path).unwrap(), "cold content");
+        // Content was moved, not copied; cold path should be gone
+        assert!(!cold_root.join("a/b").exists());
+    }
+
+    #[test]
+    fn hot_path_must_be_under_hot_root() {
+        let (hot_dir, cold_dir) = setup_hot_cold();
+        let hot_root = hot_dir.path();
+        let cold_root = cold_dir.path();
+
+        // hot_path is under cold, not hot
+        let bad_path = cold_root.join("a/b");
+        fs::create_dir_all(bad_path.parent().unwrap()).unwrap();
+        fs::write(&bad_path, b"x").unwrap();
+
+        let err = move_to_tier(hot_root, &bad_path, cold_root).unwrap_err();
+        assert!(err.to_string().contains("not a child of hot root"));
+    }
+
+    #[test]
+    fn noop_when_already_at_target() {
+        let (hot_dir, cold_dir) = setup_hot_cold();
+        let hot_root = hot_dir.path();
+        let cold_root = cold_dir.path();
+
+        let hot_path = hot_root.join("a/b");
+        fs::create_dir_all(hot_path.parent().unwrap()).unwrap();
+        fs::write(&hot_path, b"data").unwrap();
+
+        move_to_tier(hot_root, &hot_path, cold_root).unwrap();
+        move_to_tier(hot_root, &hot_path, cold_root).unwrap(); // no-op
+
+        assert_eq!(fs::read_to_string(cold_root.join("a/b")).unwrap(), "data");
+    }
+}
