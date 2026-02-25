@@ -4,52 +4,20 @@ use std::io;
 use std::os::unix::fs as unix_fs;
 use std::path::{Path, PathBuf};
 
-/// Move the backing data for a hot path into a given tier.
+/// Internal: move the backing for a hot path into a tier. Used by [`TierState::move_to_tier`](crate::tier_state::TierState::move_to_tier);
+/// policies should call that method, not this one.
 ///
-/// This is the only function you need for tiering: demotion, promotion to warm,
-/// and promotion to hot are all "put the backing for this hot path in this tier."
+/// - **`hot_root`** — Hot namespace root; `hot_path` must be a child (checked first).
+/// - **`hot_path`** — The stable path clients use; must exist (file or symlink).
+/// - **`target_dir`** — Where the backing should live: if equal to `hot_root`, backing moves to `hot_path` (promote); otherwise backing moves to `target_dir/rel` and `hot_path` becomes a symlink (evict).
 ///
-/// # Canonical path
-///
-/// The **canonical path** is always under `hot_root` (e.g. `/hot/a/b`). Clients
-/// always use that path; where the bytes actually live is an implementation detail.
-///
-/// # Parameters
-///
-/// - **`hot_root`** — Root of the hot (canonical) namespace, e.g. `/hot`.
-/// - **`hot_path`** — Full path under `hot_root` for the file, e.g. `/hot/a/b`.
-///   Must be a child of `hot_root` (verified before any other work).
-/// - **`target_dir`** — The tier where the backing should live after the call:
-///   - If `target_dir == hot_root`: bytes are moved to `hot_path` (promote to hot).
-///     No-op if the backing is already at `hot_path`.
-///   - Otherwise (warm or cold): bytes are moved to `target_dir` with the same
-///     relative path (e.g. `/cold/a/b`), and `hot_path` becomes a symlink to that.
-///     No-op if the backing is already at that path.
-///
-/// # Examples
-///
-/// ```ignore
-/// use crate::tier_fs::move_to_tier;
-///
-/// let hot = Path::new("/hot");
-/// let cold = Path::new("/cold");
-/// let warm = Path::new("/warm");
-///
-/// // Demote: put backing for /hot/a/b into cold tier → /hot/a/b becomes symlink to /cold/a/b
-/// move_to_tier(hot, &hot.join("a/b"), cold)?;
-///
-/// // Promote cold → warm: put backing into warm tier → /hot/a/b becomes symlink to /warm/a/b
-/// move_to_tier(hot, &hot.join("a/b"), warm)?;
-///
-/// // Promote to hot: put backing at the canonical path → /hot/a/b is now a regular file
-/// move_to_tier(hot, &hot.join("a/b"), hot)?;
-/// ```
+/// Returns size in bytes moved, or 0 if no-op.
 #[allow(dead_code)]
 pub fn move_to_tier(
     hot_root: &Path,
     hot_path: &Path,
     target_dir: &Path,
-) -> Result<(), Box<dyn Error + Send + Sync>> {
+) -> Result<u64, Box<dyn Error + Send + Sync>> {
     let rel = hot_path
         .strip_prefix(hot_root)
         .map_err(|_| format!("hot path {hot_path:?} is not a child of hot root {hot_root:?}"))?;
@@ -75,12 +43,14 @@ pub fn move_to_tier(
         return Err(format!("hot path {hot_path:?} is neither file nor symlink").into());
     };
 
+    let size = fs::metadata(&current_backing)?.len();
+
     let promote_to_hot = target_dir == hot_root;
 
     if promote_to_hot {
         // Target tier is hot: bytes must live at `hot_path`.
         if current_backing == hot_path {
-            return Ok(());
+            return Ok(0);
         }
         if let Some(parent) = hot_path.parent() {
             fs::create_dir_all(parent)?;
@@ -89,11 +59,12 @@ pub fn move_to_tier(
             fs::remove_file(hot_path)?;
         }
         fs::rename(&current_backing, hot_path)?;
+        Ok(size)
     } else {
         // Target tier is warm/cold: bytes at target_dir/rel, hot_path is a symlink.
         let target_backing: PathBuf = target_dir.join(rel);
         if current_backing == target_backing {
-            return Ok(());
+            return Ok(0);
         }
         if let Some(parent) = target_backing.parent() {
             fs::create_dir_all(parent)?;
@@ -103,9 +74,31 @@ pub fn move_to_tier(
             let _ = fs::remove_file(hot_path);
         }
         unix_fs::symlink(&target_backing, hot_path)?;
+        Ok(size)
     }
+}
 
-    Ok(())
+/// Size in bytes of all **regular files** under `dir`. Symlinks are **ignored** (count 0)
+/// so hot tier size doesn't double-count content in another tier. Used by [`TierState::init_bytes`](crate::tier_state::TierState::init_bytes); call once at startup, not every reorganize (O(n) stats).
+pub fn tier_size_bytes(dir: &Path) -> Result<u64, Box<dyn Error + Send + Sync>> {
+    let meta = fs::symlink_metadata(dir)?;
+    if !meta.is_dir() {
+        return Err(format!("not a directory: {dir:?}").into());
+    }
+    let mut total: u64 = 0;
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let meta = fs::symlink_metadata(&path)?;
+        let ft = meta.file_type();
+        if ft.is_dir() && !ft.is_symlink() {
+            total += tier_size_bytes(&path)?;
+        } else if meta.is_file() {
+            total += meta.len();
+        }
+        // symlinks skipped — content lives in another tier
+    }
+    Ok(total)
 }
 
 #[cfg(test)]
@@ -131,7 +124,8 @@ mod tests {
         fs::create_dir_all(hot_path.parent().unwrap()).unwrap();
         fs::write(&hot_path, b"hello tier").unwrap();
 
-        move_to_tier(hot_root, &hot_path, cold_root).unwrap();
+        let size = move_to_tier(hot_root, &hot_path, cold_root).unwrap();
+        assert_eq!(size, 10); // "hello tier".len()
 
         // hot/a/b should be a symlink to cold/a/b
         assert!(
@@ -204,8 +198,25 @@ mod tests {
         fs::write(&hot_path, b"data").unwrap();
 
         move_to_tier(hot_root, &hot_path, cold_root).unwrap();
-        move_to_tier(hot_root, &hot_path, cold_root).unwrap(); // no-op
+        let size2 = move_to_tier(hot_root, &hot_path, cold_root).unwrap(); // no-op
+        assert_eq!(size2, 0);
 
         assert_eq!(fs::read_to_string(cold_root.join("a/b")).unwrap(), "data");
+    }
+
+    #[test]
+    fn tier_size_bytes_ignores_symlinks() {
+        let (hot_dir, cold_dir) = setup_hot_cold();
+        let hot_root = hot_dir.path();
+        let cold_root = cold_dir.path();
+
+        fs::write(hot_root.join("f1"), b"hello").unwrap();
+        fs::write(hot_root.join("f2"), b"world").unwrap();
+        fs::create_dir_all(cold_root.join("a")).unwrap();
+        fs::write(cold_root.join("a/b"), b"x").unwrap();
+        std::os::unix::fs::symlink(cold_root.join("a/b"), hot_root.join("link")).unwrap();
+
+        assert_eq!(tier_size_bytes(hot_root).unwrap(), 5 + 5);
+        assert_eq!(tier_size_bytes(cold_root).unwrap(), 1);
     }
 }

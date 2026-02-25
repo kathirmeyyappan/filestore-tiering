@@ -33,11 +33,10 @@ impl FsWatcher {
         })
     }
 
-    /// Retrieve all file access events since last call.
+    /// Retrieve all file access events since last call. Drains the channel of events since last poll.
     pub fn poll(&self) -> Vec<AccessEvent> {
         let mut events = Vec::new();
         let now = SystemTime::now();
-        // drain channel of all file access events since last time
         while let Ok(Ok(ev)) = self.rx.try_recv() {
             let kind = map_event_kind(&ev.kind);
             for path in ev.paths {
