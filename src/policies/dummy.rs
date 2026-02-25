@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 use crate::policy_engine::{AccessEvent, PolicyEngine};
 
+#[allow(dead_code)]
 pub struct DummyPolicy {
     pub hot_storage: PathBuf,
     pub cold_storage: Vec<PathBuf>,
@@ -33,6 +34,19 @@ impl PolicyEngine for DummyPolicy {
 
     fn reorganize(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         log::info!("[dummy policy] reorganize called");
+
+        // Example: single mover for demotion and promotion.
+        //
+        // use crate::tier_fs::move_to_tier;
+        //
+        // let hot_path = self.hot_storage.join("some/relative/path");
+        //
+        // // Demote to cold
+        // move_to_tier(&self.hot_storage, &hot_path, &self.cold_storage[0])?;
+        //
+        // // Promote to hot (pass hot as target)
+        // move_to_tier(&self.hot_storage, &hot_path, &self.hot_storage)?;
+
         Ok(())
     }
 }
