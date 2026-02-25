@@ -2,6 +2,8 @@ use std::error::Error;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+pub use crate::tier_state::TierState;
+
 /// What happened to the path (create, change, delete, etc.).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FsEventKind {
@@ -33,10 +35,8 @@ pub trait PolicyEngine {
         _cold_storage: &[PathBuf],
     ) -> Result<(), Box<dyn Error + Send + Sync>>
     where
-        // so that we can only call on concrete type (dyn PolicyEngine)
         Self: Sized,
     {
-        // default: accept any config.
         Ok(())
     }
 
@@ -45,5 +45,6 @@ pub trait PolicyEngine {
 
     /// Examine internal state and perform any file migrations
     /// (promotions / evictions) between hot, warm, and cold tiers.
+    /// Tier state is held inside the engine; use `self.tier_state` (or equivalent) for promotion/demotion and byte queries.
     fn reorganize(&mut self) -> Result<(), Box<dyn Error + Send + Sync>>;
 }
