@@ -133,11 +133,19 @@ mod tests {
         move_to_tier(hot_root, &hot_path, cold_root).unwrap();
 
         // hot/a/b should be a symlink to cold/a/b
-        assert!(fs::symlink_metadata(&hot_path).unwrap().file_type().is_symlink());
+        assert!(
+            fs::symlink_metadata(&hot_path)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
         let target = fs::read_link(&hot_path).unwrap();
         assert_eq!(target, cold_root.join("a/b"));
         // Content should be in cold
-        assert_eq!(fs::read_to_string(cold_root.join("a/b")).unwrap(), "hello tier");
+        assert_eq!(
+            fs::read_to_string(cold_root.join("a/b")).unwrap(),
+            "hello tier"
+        );
         // Reading via hot path should still work (follows symlink)
         assert_eq!(fs::read_to_string(&hot_path).unwrap(), "hello tier");
     }
@@ -158,7 +166,12 @@ mod tests {
         move_to_tier(hot_root, &hot_path, hot_root).unwrap();
 
         // hot/a/b should now be a regular file with the content
-        assert!(!fs::symlink_metadata(&hot_path).unwrap().file_type().is_symlink());
+        assert!(
+            !fs::symlink_metadata(&hot_path)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
         assert_eq!(fs::read_to_string(&hot_path).unwrap(), "cold content");
         // Content was moved, not copied; cold path should be gone
         assert!(!cold_root.join("a/b").exists());
