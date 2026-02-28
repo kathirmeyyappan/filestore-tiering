@@ -148,10 +148,39 @@ When implementing a new policy (e.g. another eviction strategy), use this list s
 - [ ] **Eviction when path is gone:** When you pop a path for eviction, if `path.exists()` is false, don’t call `move_to_tier`; remove from hot_sizes/cold_sizes and adjust bytes, then continue (same for any “evict LRU” loop).
 - [ ] **Test “no loop”:** Add a test that, after one reorganize that evicts a file, ingests the exact event pattern the watcher would send (Create+Modify on cold, Modify on hot symlink), runs reorganize again, and asserts no re-promotion and stable hot/cold bytes. This would have caught the basic_lru loop.
 - [ ] **Main loop order:** Your `ingest` sees `last_modified` from the **previous** reorganize because the runner clears nothing between ingest and reorganize; we clear `last_modified` at the **start** of reorganize. Design your filter with that in mind.
+- [ ] **Renames:** See §10. We do not detect rename (Remove + Create). In **this policy** renames do not cause correctness or performance issues; cold_bytes undercount after symlink rename is accounting/observability only.
 
 ---
 
-## 9. File Layout Reference
+## 10. Handling Renames (Filename Changes)
+
+We **do not** explicitly detect renames (e.g. by matching Remove(old) + Create(new) in the same batch). We treat each event independently.
+
+**Correctness and performance in this policy:** basic_lru **never** branches on `cold_bytes` — it only updates it (and logs it). Eviction and promotion are driven by **hot_bytes**, **hot_bytes_left()**, the **queue** (LRU order), and **touched** events. So **renames do not cause wrong eviction/promotion decisions, loops, or other correctness or performance issues** in this policy. The only effect of a symlink rename is that `cold_bytes` can be undercounted (observability); that does not change how the policy behaves.
+
+### 10.1 Rename of a **hot** file (regular file at hot path)
+
+- Watcher typically sends **Remove(old_path)** and **Create(new_path)** (and often Modify(new_path)).
+- **Remove(old_path):** We drop `old_path` from `hot_sizes`, `queue`, and call `adjust_hot_bytes(old_sz, 0)`. Correct.
+- **Create(new_path):** Create is included in `touched` (new path is not in `last_modified`). In reorganize we process `new_path`; it’s a regular file under hot and not in `hot_sizes`, so we add it (`new_in_hot`), call `adjust_hot_bytes(0, sz)`, and push to front of queue.
+- **Result:** Old path removed, new path added with correct size. **No correctness or performance impact.**
+
+### 10.2 Rename of a **cold** file’s symlink (hot path was a symlink → user renames it)
+
+- On Unix, renaming the symlink renames the symlink inode; the **backing file** stays at the same cold path (e.g. `cold/a`).
+- Watcher sends **Remove(hot/old)** and **Create(hot/new)**; `hot/new` is a symlink still pointing at `cold/a`.
+- **Remove(hot/old):** We remove `hot/old` from `cold_sizes` and call `adjust_cold_bytes(0, sz, 0)`. We have now **subtracted** that file’s size from `cold_bytes`, but the backing file **still exists** in cold. So **cold_bytes is undercounted** until we correct it.
+- **Create(hot/new):** We include it in `touched`. In reorganize we see `hot/new` is a symlink; we treat it as “in cold” and can **promote** it. Promoting moves the backing from cold to hot and we subtract from cold again (and add to hot). So we would **double-subtract** from cold (once on Remove, once on promote) — **cold_bytes** would be wrong (too low). If we **don’t** promote (e.g. no capacity), we never add `hot/new` to `cold_sizes`, so we have an orphan cold file (still on disk) and **cold_bytes** remains undercounted.
+- **Reconciliation** only drops entries whose **hot path** is gone. After a rename, the hot path **is** gone (old path), so we drop it and subtract from cold_bytes — which we already did on Remove. The **new** hot path (`hot/new`) is a symlink; we don’t add it to `cold_sizes` in reconciliation (we only remove stale entries). So we never “re-add” the cold file under the new name in our maps.
+- **Result:** **No correctness or performance impact.** Eviction and promotion logic are unchanged. The only effect is that **cold_bytes** can be too low (accounting/observability only); this policy does not use cold_bytes for any control flow.
+
+### 10.3 Note for other policies
+
+If a policy **does** use `cold_bytes` or `cold_bytes_left()` for decisions (e.g. cold capacity), symlink renames could cause wrong behavior unless the policy explicitly handles rename (e.g. transfer cold_sizes from old to new path when Create(new) is a symlink pointing at the same backing as a just-removed path).
+
+---
+
+## 11. File Layout Reference
 
 - **Policy trait and events:** `src/policy_engine.rs` (`PolicyEngine`, `AccessEvent`, `FsEventKind`).
 - **Tier state and move API:** `src/tier_state.rs` (`TierState`, `move_to_tier`, `adjust_hot_bytes`, `adjust_cold_bytes`, `init_bytes`).
