@@ -235,3 +235,135 @@ impl PolicyEngine for BasicLruPolicy {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[cfg(unix)]
+mod tests {
+    use std::fs;
+    use std::time::SystemTime;
+
+    use super::*;
+    use crate::policy_engine::FsEventKind;
+
+    /// Tests feed the policy the same event stream the main loop would: we never run the watcher.
+    /// "Touch via hot" = ingest an event with path = hot path; "touch via cold" = ingest an
+    /// event with path = cold path (what the watcher reports when the user edits via the
+    /// hot symlink). The policy only sees paths and kinds; it maps cold→hot and promotes.
+
+    fn setup_dirs() -> (tempfile::TempDir, tempfile::TempDir) {
+        (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap())
+    }
+
+    /// Over capacity: reorganize evicts LRU to cold.
+    #[test]
+    fn over_capacity_evicts_lru_to_cold() {
+        let (hot_dir, cold_dir) = setup_dirs();
+        let hot_root = fs::canonicalize(hot_dir.path()).unwrap();
+        let cold_root = fs::canonicalize(cold_dir.path()).unwrap();
+        fs::write(hot_root.join("f1"), b"tenbytes!!").unwrap();
+        fs::write(hot_root.join("f2"), b"tenbytes!!").unwrap();
+        let mut tier_state = TierState::new(hot_root.clone(), vec![cold_root.clone()], 15, vec![u64::MAX]);
+        tier_state.init_bytes().unwrap();
+        let mut policy = BasicLruPolicy::new(tier_state);
+        policy.reorganize().unwrap();
+        assert!(policy.tier_state.hot_bytes() <= 15);
+        let symlink_count = [hot_root.join("f1"), hot_root.join("f2")]
+            .iter()
+            .filter(|p| fs::symlink_metadata(p).map(|m| m.file_type().is_symlink()).unwrap_or(false))
+            .count();
+        assert_eq!(symlink_count, 1);
+        assert!(cold_root.join("f1").exists() || cold_root.join("f2").exists());
+    }
+
+    /// Touch hot path (ingest event with hot path) makes that file MRU; it stays in hot on next reorganize.
+    #[test]
+    fn touch_hot_path_mru_then_evict_lru() {
+        let (hot_dir, cold_dir) = setup_dirs();
+        let hot_root = fs::canonicalize(hot_dir.path()).unwrap();
+        let cold_root = fs::canonicalize(cold_dir.path()).unwrap();
+        fs::write(hot_root.join("a"), b"aaaaaaaaaa").unwrap();
+        fs::write(hot_root.join("b"), b"bbbbbbbbbb").unwrap();
+        let mut tier_state = TierState::new(hot_root.clone(), vec![cold_root.clone()], 15, vec![u64::MAX]);
+        tier_state.init_bytes().unwrap();
+        let mut policy = BasicLruPolicy::new(tier_state);
+        policy.reorganize().unwrap();
+        let hot_a = hot_root.join("a");
+        let hot_b = hot_root.join("b");
+        let (mru_path, lru_path) = if fs::symlink_metadata(&hot_a).map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+            (hot_b.clone(), hot_a)
+        } else {
+            (hot_a.clone(), hot_b)
+        };
+        policy.ingest(&[AccessEvent { path: mru_path.clone(), kind: FsEventKind::Modify, timestamp: SystemTime::now() }]);
+        policy.reorganize().unwrap();
+        // Touched file (MRU) stayed in hot; we did not evict it (still under cap).
+        assert!(!fs::symlink_metadata(&mru_path).unwrap().file_type().is_symlink());
+        // LRU (untouched) is in cold.
+        assert!(fs::symlink_metadata(&lru_path).map(|m| m.file_type().is_symlink()).unwrap_or(false));
+    }
+
+    /// Remove event: policy drops path from cold_sizes / cold_bytes.
+    #[test]
+    fn remove_event_cleans_state() {
+        let (hot_dir, cold_dir) = setup_dirs();
+        let hot_root = fs::canonicalize(hot_dir.path()).unwrap();
+        let cold_root = fs::canonicalize(cold_dir.path()).unwrap();
+        fs::write(hot_root.join("f"), b"content").unwrap();
+        let mut tier_state = TierState::new(hot_root.clone(), vec![cold_root.clone()], 5, vec![u64::MAX]);
+        tier_state.init_bytes().unwrap();
+        let mut policy = BasicLruPolicy::new(tier_state);
+        policy.reorganize().unwrap();
+        let hot_path = hot_root.join("f");
+        let cold_before = policy.tier_state.cold_bytes(0);
+        fs::remove_file(&hot_path).unwrap();
+        fs::remove_file(cold_root.join("f")).unwrap();
+        policy.ingest(&[AccessEvent { path: hot_path, kind: FsEventKind::Remove, timestamp: SystemTime::now() }]);
+        policy.reorganize().unwrap();
+        assert!(policy.tier_state.cold_bytes(0) < cold_before);
+    }
+
+    /// Cold-path event (simulate "edit via symlink") → policy maps to hot path and promotes.
+    #[test]
+    fn touch_via_cold_path_promotes_to_hot() {
+        let (hot_dir, cold_dir) = setup_dirs();
+        let hot_root = fs::canonicalize(hot_dir.path()).unwrap();
+        let cold_root = fs::canonicalize(cold_dir.path()).unwrap();
+
+        // Two files; capacity 15 so one stays in hot, one evicted
+        fs::create_dir_all(hot_root.join("sub")).unwrap();
+        fs::write(hot_root.join("sub/a"), b"aaaaaaaaaa").unwrap();
+        fs::write(hot_root.join("sub/b"), b"bbbbbbbbbb").unwrap();
+
+        let mut tier_state = TierState::new(
+            hot_root.clone(),
+            vec![cold_root.clone()],
+            15,
+            vec![u64::MAX],
+        );
+        tier_state.init_bytes().unwrap();
+
+        let mut policy = BasicLruPolicy::new(tier_state);
+        policy.reorganize().unwrap();
+
+        // One file in cold (evicted), one in hot
+        let cold_a = cold_root.join("sub/a");
+        let cold_b = cold_root.join("sub/b");
+        let (cold_path, hot_path) = if cold_a.exists() {
+            (cold_a, hot_root.join("sub/a"))
+        } else {
+            (cold_b, hot_root.join("sub/b"))
+        };
+
+        let cold_path_canonical = fs::canonicalize(&cold_path).unwrap();
+        policy.ingest(&[AccessEvent {
+            path: cold_path_canonical,
+            kind: FsEventKind::Modify,
+            timestamp: SystemTime::now(),
+        }]);
+
+        policy.reorganize().unwrap();
+
+        assert!(!fs::symlink_metadata(&hot_path).unwrap().file_type().is_symlink());
+        assert!(!cold_path.exists());
+    }
+}
