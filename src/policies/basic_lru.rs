@@ -75,6 +75,11 @@ impl BasicLruPolicy {
         }
         false
     }
+
+    #[cfg(test)]
+    pub(crate) fn touched_count_for_test(&self) -> usize {
+        self.touched.len()
+    }
 }
 
 impl PolicyEngine for BasicLruPolicy {
@@ -107,9 +112,9 @@ impl PolicyEngine for BasicLruPolicy {
                     if let Some(old) = self.hot_sizes.remove(&path) {
                         self.tier_state.adjust_hot_bytes(old, 0);
                         self.queue.retain(|p| p != &path);
-                    } else if let Some(sz) = self.cold_sizes.remove(&path) {
-                        self.tier_state.adjust_cold_bytes(0, sz, 0);
                     }
+                    // Leave cold_sizes as-is on Remove; reconcile will drop the entry and only
+                    // subtract cold_bytes when the cold backing file is actually gone (not rename).
                 }
                 _ => {}
             }
@@ -149,6 +154,16 @@ impl PolicyEngine for BasicLruPolicy {
                 if (in_modified && (our_move || our_symlink_modify))
                     || (logical_hot_in_modified && our_move)
                 {
+                    // Exception: Create on a path we evicted (now in last_modified) can be a
+                    // rename: symlink was moved to this path, so path exists as symlink — count as touch so we promote.
+                    if e.kind == FsEventKind::Create
+                        && under_hot
+                        && fs::symlink_metadata(&p)
+                            .map(|m| m.file_type().is_symlink())
+                            .unwrap_or(false)
+                    {
+                        return true;
+                    }
                     return false;
                 }
                 true
@@ -170,6 +185,8 @@ impl PolicyEngine for BasicLruPolicy {
         self.last_modified.clear();
 
         // Reconcile cold_sizes with filesystem so drift doesn't persist and affect policy decisions.
+        // cold_sizes is keyed by hot path; backing lives at cold/rel. Only subtract cold_bytes when
+        // the backing file is actually gone (not when the hot path is just gone, e.g. rename).
         let mut to_drop: Vec<(PathBuf, u64)> = Vec::new();
         for (p, &sz) in self.cold_sizes.iter() {
             if fs::symlink_metadata(p).is_err() {
@@ -178,14 +195,25 @@ impl PolicyEngine for BasicLruPolicy {
         }
         for (p, sz) in to_drop {
             self.cold_sizes.remove(&p);
-            self.tier_state.adjust_cold_bytes(0, sz, 0);
+            let rel = p
+                .strip_prefix(&hot_root)
+                .unwrap_or_else(|_| Path::new(""));
+            let cold_backing = cold.join(rel);
+            if fs::metadata(&cold_backing).is_err() {
+                self.tier_state.adjust_cold_bytes(0, sz, 0);
+            }
             self.queue.retain(|q| q != &p);
         }
 
-        // Reconcile hot_sizes/queue: drop entries whose path no longer exists.
+        // Reconcile hot_sizes/queue: drop entries whose path no longer exists or is a symlink
+        // (content lives in cold; do not count as hot so promote has correct headroom).
         let mut hot_drop: Vec<(PathBuf, u64)> = Vec::new();
         for (p, &sz) in self.hot_sizes.iter() {
-            if fs::metadata(p).is_err() {
+            let drop = match fs::symlink_metadata(p) {
+                Err(_) => true,
+                Ok(m) => m.file_type().is_symlink(),
+            };
+            if drop {
                 hot_drop.push((p.clone(), sz));
             }
         }
@@ -198,8 +226,12 @@ impl PolicyEngine for BasicLruPolicy {
         // First run: seed queue and hot_sizes from disk (tier_state.hot_bytes already set by init_bytes).
         if self.queue.is_empty() {
             for p in Self::list_hot_files(&hot_root, &hot_root)? {
-                if let Ok(sz) = fs::metadata(&p).map(|m| m.len()) {
-                    self.hot_sizes.insert(p.clone(), sz);
+                if let Ok(meta) = fs::symlink_metadata(&p) {
+                    if !meta.file_type().is_symlink()
+                        && let Ok(sz) = fs::metadata(&p).map(|m| m.len())
+                    {
+                        self.hot_sizes.insert(p.clone(), sz);
+                    }
                 }
                 self.queue.push_back(p);
             }
@@ -236,8 +268,8 @@ impl PolicyEngine for BasicLruPolicy {
                     // Path gone (e.g. deleted after event): correct bytes and drop from state.
                     if let Some(old) = self.hot_sizes.remove(&path) {
                         self.tier_state.adjust_hot_bytes(old, 0);
-                    } else if let Some(sz) = self.cold_sizes.remove(&path) {
-                        self.tier_state.adjust_cold_bytes(0, sz, 0);
+                    } else if self.cold_sizes.remove(&path).is_some() {
+                        // Don't subtract cold_bytes: backing may still be in cold (e.g. path renamed).
                     }
                     self.queue.retain(|p| p != &path);
                     continue;
@@ -262,9 +294,14 @@ impl PolicyEngine for BasicLruPolicy {
                     .unwrap_or(0);
                 while self.tier_state.hot_bytes_left() < need {
                     // Evict one LRU; if back was already deleted, just correct bytes.
+                    // Do not evict the path we are about to promote (same logical path).
                     let Some(back) = self.queue.pop_back() else {
                         break;
                     };
+                    if canonical(&back) == canonical(&path) {
+                        self.queue.push_front(back);
+                        break;
+                    }
                     if back.exists() {
                         let rel = back
                             .strip_prefix(&hot_root)
@@ -282,8 +319,8 @@ impl PolicyEngine for BasicLruPolicy {
                         evicted_room += 1;
                     } else if let Some(old) = self.hot_sizes.remove(&back) {
                         self.tier_state.adjust_hot_bytes(old, 0);
-                    } else if let Some(sz) = self.cold_sizes.remove(&back) {
-                        self.tier_state.adjust_cold_bytes(0, sz, 0);
+                    } else if self.cold_sizes.remove(&back).is_some() {
+                        // Don't subtract cold_bytes: backing may still be in cold (e.g. path renamed).
                     }
                 }
                 if self.tier_state.hot_bytes_left() < need {
@@ -352,8 +389,8 @@ impl PolicyEngine for BasicLruPolicy {
                 evicted += 1;
             } else if let Some(old) = self.hot_sizes.remove(&back) {
                 self.tier_state.adjust_hot_bytes(old, 0);
-            } else if let Some(sz) = self.cold_sizes.remove(&back) {
-                self.tier_state.adjust_cold_bytes(0, sz, 0);
+            } else if self.cold_sizes.remove(&back).is_some() {
+                // Don't subtract cold_bytes: backing may still be in cold (e.g. path renamed).
             }
         }
 
@@ -614,5 +651,77 @@ mod tests {
             cold_after_first,
             "cold bytes should not change"
         );
+    }
+
+    /// Rename symlink in hot (e.g. hot/a -> hot/b): ingest Remove(evicted)+Create(new), reorganize.
+    /// Verifies: (1) Create on the new path is counted as one touch (so we can promote).
+    /// (2) cold_bytes only decreases when we actually promote (move backing to hot); we must not
+    ///     subtract when we merely remove a hot path from cold_sizes (rename leaves backing in cold).
+    #[test]
+    fn rename_symlink_in_hot_promote_cold_bytes_decreases() {
+        let (hot_dir, cold_dir) = setup_dirs();
+        let hot_root = fs::canonicalize(hot_dir.path()).unwrap();
+        let cold_root = fs::canonicalize(cold_dir.path()).unwrap();
+        fs::write(hot_root.join("a"), b"aaaaaaaaaa").unwrap();
+        fs::write(hot_root.join("b"), b"bbbbbbbbbb").unwrap();
+        let mut tier_state = TierState::new(
+            hot_root.clone(),
+            vec![cold_root.clone()],
+            15,
+            vec![u64::MAX],
+        );
+        tier_state.init_bytes().unwrap();
+        let mut policy = BasicLruPolicy::new(tier_state);
+        policy.reorganize().unwrap();
+
+        let (evicted_hot, hot_new) = if fs::symlink_metadata(hot_root.join("a"))
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            (hot_root.join("a"), hot_root.join("b"))
+        } else {
+            (hot_root.join("b"), hot_root.join("a"))
+        };
+        assert!(
+            fs::symlink_metadata(&evicted_hot)
+                .map(|m| m.file_type().is_symlink())
+                .unwrap_or(false),
+            "one file should be evicted (symlink)"
+        );
+        let cold_before = policy.tier_state.cold_bytes(0);
+
+        // Rename symlink on disk: evicted_hot -> hot_new (e.g. hot/a -> hot/b)
+        fs::rename(&evicted_hot, &hot_new).unwrap();
+
+        let ts = SystemTime::now();
+        policy.ingest(&[
+            AccessEvent {
+                path: evicted_hot.clone(),
+                kind: FsEventKind::Remove,
+                timestamp: ts,
+            },
+            AccessEvent {
+                path: hot_new.clone(),
+                kind: FsEventKind::Create,
+                timestamp: ts,
+            },
+        ]);
+        assert_eq!(
+            policy.touched_count_for_test(),
+            1,
+            "Create(hot_new) should produce one touch (rename of evicted symlink)"
+        );
+        policy.reorganize().unwrap();
+
+        // cold_bytes decreases only when we promote (we no longer subtract on Remove/reconcile).
+        let promoted = !fs::symlink_metadata(&hot_new)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(true);
+        if promoted {
+            assert!(
+                policy.tier_state.cold_bytes(0) < cold_before,
+                "when we promote, cold_bytes must decrease"
+            );
+        }
     }
 }
