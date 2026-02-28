@@ -50,13 +50,8 @@ fn basic_lru_evicts_when_over_capacity() {
     let content = b"xxxxxxxxxxxxxxxxxxxx"; // 20 bytes
     fs::write(hot.join("sub/file"), content).unwrap();
 
-    let mut child = start_daemon(
-        hot.to_str().unwrap(),
-        cold.to_str().unwrap(),
-        15,
-        1,
-    )
-    .expect("start daemon");
+    let mut child =
+        start_daemon(hot.to_str().unwrap(), cold.to_str().unwrap(), 15, 1).expect("start daemon");
 
     // Allow initial fill + over-cap eviction (2 polls)
     thread::sleep(Duration::from_secs(3));
@@ -73,10 +68,7 @@ fn basic_lru_evicts_when_over_capacity() {
             .unwrap_or(false),
         "hot path should be a symlink after eviction"
     );
-    assert!(
-        cold_file.exists(),
-        "content should exist in cold"
-    );
+    assert!(cold_file.exists(), "content should exist in cold");
     assert_eq!(
         fs::read(&cold_file).unwrap(),
         content,

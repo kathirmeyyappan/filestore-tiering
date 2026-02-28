@@ -202,7 +202,8 @@ fn make_policy(
         .iter()
         .map(|p| std::fs::canonicalize(p).map_err(|e| to_err(e.into())))
         .collect::<Result<_, _>>()?;
-    let mut tier_state = TierState::new(hot_root.clone(), cold_roots, hot_capacity, cold_capacities);
+    let mut tier_state =
+        TierState::new(hot_root.clone(), cold_roots, hot_capacity, cold_capacities);
     tier_state.init_bytes().map_err(to_err)?;
 
     // New policy: add a mod in policies/mod.rs, then add a match arm here (key = --policy value).
@@ -210,7 +211,9 @@ fn make_policy(
         "basic_lru" => {
             policies::basic_lru::BasicLruPolicy::validate_config(hot_storage, cold_storage)
                 .map_err(to_err)?;
-            Ok(Box::new(policies::basic_lru::BasicLruPolicy::new(tier_state)))
+            Ok(Box::new(policies::basic_lru::BasicLruPolicy::new(
+                tier_state,
+            )))
         }
         "dummy" => {
             policies::dummy::DummyPolicy::validate_config(hot_storage, cold_storage)

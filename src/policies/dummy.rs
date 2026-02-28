@@ -31,12 +31,10 @@
 
 use std::path::Path;
 
-#[allow(unused_imports)]
-use crate::policy_engine::{AccessEvent, FsEventKind, PolicyEngine, TierState};
+use crate::policy_engine::{AccessEvent, PolicyEngine, TierState};
 use crate::policy_log;
 
 /// Example policy: accepts config, does no tiering. Copy and replace with your logic.
-#[allow(dead_code)]
 #[derive(Debug)]
 pub struct DummyPolicy {
     pub tier_state: TierState,
@@ -111,16 +109,16 @@ impl PolicyEngine for DummyPolicy {
     /// symlink_metadata(p).file_type().is_symlink()
     /// ```
     fn reorganize(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        policy_log::log_reorganize_done(
-            "dummy",
-            true,
-            0,
-            0,
-            0,
-            0,
-            self.tier_state.hot_bytes(),
-            self.tier_state.cold_bytes(0),
-        );
+        policy_log::log_reorganize_done(policy_log::ReorganizeDoneParams {
+            policy_name: "dummy",
+            should_log: true,
+            new_in_hot: 0,
+            promoted: 0,
+            evicted_room: 0,
+            evicted_cap: 0,
+            hot_bytes: self.tier_state.hot_bytes(),
+            cold_bytes: self.tier_state.cold_bytes(0),
+        });
         // Example eviction:
         //
         // let hot_path = self.tier_state.hot_root().join("some/file");

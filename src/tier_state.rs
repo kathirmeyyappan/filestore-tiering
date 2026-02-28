@@ -13,7 +13,6 @@ use crate::tier_fs;
 /// policy uses it in `reorganize` via `self` (no separate argument).
 ///
 /// **Cold tier order:** Index 0 is the **warmest** cold tier; higher indices are colder.
-#[allow(dead_code)]
 #[derive(Debug)]
 pub struct TierState {
     hot_root: PathBuf,
@@ -21,10 +20,10 @@ pub struct TierState {
     hot_bytes: u64,
     cold_bytes: Vec<u64>,
     hot_capacity: u64,
+    #[allow(dead_code)] // Reserved for policies that enforce cold capacity
     cold_capacities: Vec<u64>,
 }
 
-#[allow(dead_code)]
 impl TierState {
     /// Create tier state. Call `init_bytes()` once after creation to set current sizes.
     pub fn new(
@@ -82,7 +81,10 @@ impl TierState {
     /// Adjust hot byte count by a size change (old_size → new_size) for an in-place file edit.
     /// Call when a hot file grows or shrinks without being moved.
     pub fn adjust_hot_bytes(&mut self, old_size: u64, new_size: u64) {
-        self.hot_bytes = self.hot_bytes.saturating_sub(old_size).saturating_add(new_size);
+        self.hot_bytes = self
+            .hot_bytes
+            .saturating_sub(old_size)
+            .saturating_add(new_size);
     }
 
     /// Adjust cold tier byte count by a size change (old_size → new_size) for an in-place file edit.
@@ -94,6 +96,7 @@ impl TierState {
     }
 
     /// Bytes remaining before the given cold tier reaches capacity.
+    #[allow(dead_code)] // Reserved for policies that enforce cold capacity
     pub fn cold_bytes_left(&self, i: usize) -> u64 {
         let cap = self.cold_capacities.get(i).copied().unwrap_or(u64::MAX);
         let used = self.cold_bytes(i);

@@ -7,7 +7,7 @@
 //!
 //! **Logging:** Use `crate::policy_log` for consistent ingest / initial-fill / reorganize-done logs:
 //! `log_ingest(name, events.len())`, `log_initial_fill(name, file_count, hot_bytes)`,
-//! `log_reorganize_done(name, should_log, new, promoted, evicted_room, evicted_cap, hot_bytes, cold_bytes)`.
+//! `log_reorganize_done(ReorganizeDoneParams { policy_name, should_log, new_in_hot, promoted, evicted_room, evicted_cap, hot_bytes, cold_bytes })`.
 //!
 //! **Tier sizes and limits:** In `reorganize` use `self.tier_state.hot_bytes()`,
 //! `self.tier_state.cold_bytes(i)`, `self.tier_state.hot_bytes_left()`,

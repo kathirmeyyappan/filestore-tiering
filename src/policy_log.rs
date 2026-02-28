@@ -20,28 +20,32 @@ pub fn log_initial_fill(policy_name: &str, file_count: usize, hot_bytes: u64) {
     );
 }
 
-/// Log when reorganize finishes and something changed. Call only when `should_log` is true
-/// (e.g. `had_touches || evicted_cap > 0`). Counts can be 0 for policies that don't use all fields.
-pub fn log_reorganize_done(
-    policy_name: &str,
-    should_log: bool,
-    new_in_hot: u32,
-    promoted: u32,
-    evicted_room: u32,
-    evicted_cap: u32,
-    hot_bytes: u64,
-    cold_bytes: u64,
-) {
-    if should_log {
+/// Parameters for logging when reorganize finishes. Counts can be 0 for policies that don't use all fields.
+#[derive(Debug)]
+pub struct ReorganizeDoneParams {
+    pub policy_name: &'static str,
+    pub should_log: bool,
+    pub new_in_hot: u32,
+    pub promoted: u32,
+    pub evicted_room: u32,
+    pub evicted_cap: u32,
+    pub hot_bytes: u64,
+    pub cold_bytes: u64,
+}
+
+/// Log when reorganize finishes and something changed. Call only when `params.should_log` is true
+/// (e.g. `had_touches || evicted_cap > 0`).
+pub fn log_reorganize_done(params: ReorganizeDoneParams) {
+    if params.should_log {
         log::info!(
             "[{}] done: {} new, {} promoted, {} evicted(room), {} evicted(cap), hot={} cold={}",
-            policy_name,
-            new_in_hot,
-            promoted,
-            evicted_room,
-            evicted_cap,
-            hot_bytes,
-            cold_bytes
+            params.policy_name,
+            params.new_in_hot,
+            params.promoted,
+            params.evicted_room,
+            params.evicted_cap,
+            params.hot_bytes,
+            params.cold_bytes
         );
     }
 }
