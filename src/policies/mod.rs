@@ -5,6 +5,10 @@
 //!
 //! **Adding a new policy:** Copy `dummy.rs` to a new file, implement the trait, then add a match arm in `main.rs`'s `make_policy` (key = `--policy` value).
 //!
+//! **Logging:** Use `crate::policy_log` for consistent ingest / initial-fill / reorganize-done logs:
+//! `log_ingest(name, events.len())`, `log_initial_fill(name, file_count, hot_bytes)`,
+//! `log_reorganize_done(name, should_log, new, promoted, evicted_room, evicted_cap, hot_bytes, cold_bytes)`.
+//!
 //! **Tier sizes and limits:** In `reorganize` use `self.tier_state.hot_bytes()`,
 //! `self.tier_state.cold_bytes(i)`, `self.tier_state.hot_bytes_left()`,
 //! `self.tier_state.cold_bytes_left(i)`, and `self.tier_state.move_to_tier(hot_path, target_dir)`.

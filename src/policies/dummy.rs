@@ -33,6 +33,7 @@ use std::path::Path;
 
 #[allow(unused_imports)]
 use crate::policy_engine::{AccessEvent, FsEventKind, PolicyEngine, TierState};
+use crate::policy_log;
 
 /// Example policy: accepts config, does no tiering. Copy and replace with your logic.
 #[allow(dead_code)]
@@ -75,7 +76,7 @@ impl PolicyEngine for DummyPolicy {
     /// }
     /// ```
     fn ingest(&mut self, events: &[AccessEvent]) {
-        log::info!("[dummy policy] ingest called with {} events", events.len());
+        policy_log::log_ingest("dummy", events.len());
     }
 
     /// Called every poll after ingest. Use `self.tier_state` for paths, sizes, capacity, and moves.
@@ -110,7 +111,16 @@ impl PolicyEngine for DummyPolicy {
     /// symlink_metadata(p).file_type().is_symlink()
     /// ```
     fn reorganize(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        log::info!("[dummy policy] reorganize called");
+        policy_log::log_reorganize_done(
+            "dummy",
+            true,
+            0,
+            0,
+            0,
+            0,
+            self.tier_state.hot_bytes(),
+            self.tier_state.cold_bytes(0),
+        );
         // Example eviction:
         //
         // let hot_path = self.tier_state.hot_root().join("some/file");
