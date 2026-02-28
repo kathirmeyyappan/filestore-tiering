@@ -1,6 +1,6 @@
 //! Basic LRU: one hot (capacity-limited), one cold. Touch = promote or MRU. Evict LRU until under capacity.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -24,6 +24,8 @@ pub struct BasicLruPolicy {
     hot_sizes: HashMap<PathBuf, u64>,
     cold_sizes: HashMap<PathBuf, u64>,
     touched: Vec<(PathBuf, SystemTime)>,
+    /// Paths we modified in the last reorganize (evicted or promoted). We ignore Create/Remove for these on the next poll so we don't react to our own moves; Modify still counts so user edits are seen.
+    last_modified: HashSet<PathBuf>,
 }
 
 impl BasicLruPolicy {
@@ -34,6 +36,7 @@ impl BasicLruPolicy {
             hot_sizes: HashMap::new(),
             cold_sizes: HashMap::new(),
             touched: Vec::new(),
+            last_modified: HashSet::new(),
         }
     }
 
@@ -50,6 +53,24 @@ impl BasicLruPolicy {
             }
         }
         Ok(out)
+    }
+
+    fn path_modified_last_reorganize(&self, path: &Path) -> bool {
+        if self.last_modified.contains(path) {
+            return true;
+        }
+        if let Some(cold) = self.tier_state.cold_root(0) {
+            let cold_abs = canonical(cold);
+            if path.starts_with(&cold_abs) {
+                if let Ok(rel) = path.strip_prefix(&cold_abs) {
+                    let logical_hot = canonical(self.tier_state.hot_root()).join(rel);
+                    if self.last_modified.contains(&logical_hot) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
     }
 }
 
@@ -77,6 +98,9 @@ impl PolicyEngine for BasicLruPolicy {
                     }
                 }
                 FsEventKind::Remove => {
+                    if self.path_modified_last_reorganize(&path) {
+                        continue;
+                    }
                     if let Some(old) = self.hot_sizes.remove(&path) {
                         self.tier_state.adjust_hot_bytes(old, 0);
                         self.queue.retain(|p| p != &path);
@@ -87,7 +111,43 @@ impl PolicyEngine for BasicLruPolicy {
                 _ => {}
             }
         }
-        self.touched = events.iter().map(|e| (e.path.clone(), e.timestamp)).collect();
+        // Build touched. Exclude: (1) Create/Remove on paths we moved, (2) Modify on hot path we
+        // changed (our symlink), (3) Modify on a path under cold that had Create in this batch
+        // (our eviction creates the cold file → Create+Modify; don't count that Modify as touch).
+        // Only apply (3) to cold paths so new files created in hot (Create+Modify) still count as touch.
+        let hot_root = canonical(self.tier_state.hot_root());
+        let cold_abs = self.tier_state.cold_root(0).map(|c| canonical(c));
+        let created_this_batch: HashSet<_> = events
+            .iter()
+            .filter(|e| e.kind == FsEventKind::Create)
+            .map(|e| canonical(&e.path))
+            .collect();
+        self.touched = events
+            .iter()
+            .filter(|e| {
+                let p = canonical(&e.path);
+                let modify_after_create_on_cold = e.kind == FsEventKind::Modify
+                    && created_this_batch.contains(&p)
+                    && cold_abs.as_ref().map_or(false, |c| p.starts_with(c));
+                if modify_after_create_on_cold {
+                    return false;
+                }
+                let in_modified = self.last_modified.contains(&p);
+                let under_hot = p.starts_with(&hot_root);
+                let logical_hot_in_modified = cold_abs.as_ref().and_then(|c| {
+                    p.strip_prefix(c).ok().map(|rel| hot_root.join(rel))
+                }).as_ref().map_or(false, |h| self.last_modified.contains(h));
+
+                let our_move = matches!(e.kind, FsEventKind::Create | FsEventKind::Remove);
+                let our_symlink_modify = e.kind == FsEventKind::Modify && in_modified && under_hot;
+
+                if (in_modified && (our_move || our_symlink_modify)) || (logical_hot_in_modified && our_move) {
+                    return false;
+                }
+                true
+            })
+            .map(|e| (e.path.clone(), e.timestamp))
+            .collect();
         policy_log::log_ingest("basic_lru", events.len());
     }
 
@@ -95,6 +155,34 @@ impl PolicyEngine for BasicLruPolicy {
         let hot_root = canonical(self.tier_state.hot_root());
         let cold = self.tier_state.cold_root(0).expect("one cold tier").to_path_buf();
         let cold_abs = canonical(&cold);
+
+        self.last_modified.clear();
+
+        // Reconcile cold_sizes with filesystem so drift doesn't persist and affect policy decisions.
+        let mut to_drop: Vec<(PathBuf, u64)> = Vec::new();
+        for (p, &sz) in self.cold_sizes.iter() {
+            if fs::symlink_metadata(p).is_err() {
+                to_drop.push((p.clone(), sz));
+            }
+        }
+        for (p, sz) in to_drop {
+            self.cold_sizes.remove(&p);
+            self.tier_state.adjust_cold_bytes(0, sz, 0);
+            self.queue.retain(|q| q != &p);
+        }
+
+        // Reconcile hot_sizes/queue: drop entries whose path no longer exists.
+        let mut hot_drop: Vec<(PathBuf, u64)> = Vec::new();
+        for (p, &sz) in self.hot_sizes.iter() {
+            if fs::metadata(p).is_err() {
+                hot_drop.push((p.clone(), sz));
+            }
+        }
+        for (p, sz) in hot_drop {
+            self.hot_sizes.remove(&p);
+            self.tier_state.adjust_hot_bytes(sz, 0);
+            self.queue.retain(|q| q != &p);
+        }
 
         // First run: seed queue and hot_sizes from disk (tier_state.hot_bytes already set by init_bytes).
         if self.queue.is_empty() {
@@ -157,6 +245,8 @@ impl PolicyEngine for BasicLruPolicy {
                     // Evict one LRU; if back was already deleted, just correct bytes.
                     let Some(back) = self.queue.pop_back() else { break };
                     if back.exists() {
+                        let rel = back.strip_prefix(&hot_root).unwrap_or_else(|_| Path::new(""));
+                        let cold_path = cold.join(rel);
                         let sz = self.tier_state.move_to_tier(&back, &cold)?;
                         if sz > 0 {
                             self.tier_state.adjust_hot_bytes(sz, 0);
@@ -164,6 +254,8 @@ impl PolicyEngine for BasicLruPolicy {
                         }
                         self.hot_sizes.remove(&back);
                         self.cold_sizes.insert(back.clone(), sz);
+                        self.last_modified.insert(canonical(&back));
+                        self.last_modified.insert(canonical(&cold_path));
                         evicted_room += 1;
                     } else if let Some(old) = self.hot_sizes.remove(&back) {
                         self.tier_state.adjust_hot_bytes(old, 0);
@@ -174,6 +266,11 @@ impl PolicyEngine for BasicLruPolicy {
                 if self.tier_state.hot_bytes_left() < need {
                     return Err(format!("not enough hot capacity to promote {:?} (need {} bytes)", path, need).into());
                 }
+                let cold_backing = fs::read_link(&path)
+                    .ok()
+                    .map(|t| {
+                        if t.is_absolute() { t } else { path.parent().unwrap_or(Path::new("/")).join(t) }
+                    });
                 let moved = self.tier_state.move_to_tier(&path, &hot_root)?;
                 let sz = fs::metadata(&path).map(|m| m.len()).unwrap_or(moved);
                 if sz > 0 {
@@ -183,6 +280,10 @@ impl PolicyEngine for BasicLruPolicy {
                 self.hot_sizes.insert(path.clone(), sz);
                 self.cold_sizes.remove(&path);
                 self.queue.retain(|p| p != &path);
+                self.last_modified.insert(canonical(&path));
+                if let Some(ref cb) = cold_backing {
+                    self.last_modified.insert(canonical(cb));
+                }
                 promoted += 1;
                 self.queue.push_front(path);
             } else {
@@ -204,6 +305,8 @@ impl PolicyEngine for BasicLruPolicy {
         while self.tier_state.hot_bytes_left() == 0 {
             let Some(back) = self.queue.pop_back() else { break };
             if back.exists() {
+                let rel = back.strip_prefix(&hot_root).unwrap_or_else(|_| Path::new(""));
+                let cold_path = cold.join(rel);
                 let sz = self.tier_state.move_to_tier(&back, &cold)?;
                 if sz > 0 {
                     self.tier_state.adjust_hot_bytes(sz, 0);
@@ -211,6 +314,8 @@ impl PolicyEngine for BasicLruPolicy {
                 }
                 self.hot_sizes.remove(&back);
                 self.cold_sizes.insert(back.clone(), sz);
+                self.last_modified.insert(canonical(&back));
+                self.last_modified.insert(canonical(&cold_path));
                 evicted += 1;
             } else if let Some(old) = self.hot_sizes.remove(&back) {
                 self.tier_state.adjust_hot_bytes(old, 0);
@@ -365,5 +470,49 @@ mod tests {
 
         assert!(!fs::symlink_metadata(&hot_path).unwrap().file_type().is_symlink());
         assert!(!cold_path.exists());
+    }
+
+    /// Events that look like "watcher after our eviction" (Create+Modify on cold, Modify on hot
+    /// symlink) must not be treated as touch — otherwise we re-promote and oscillate every poll.
+    #[test]
+    fn no_loop_when_ingest_events_from_our_own_eviction() {
+        let (hot_dir, cold_dir) = setup_dirs();
+        let hot_root = fs::canonicalize(hot_dir.path()).unwrap();
+        let cold_root = fs::canonicalize(cold_dir.path()).unwrap();
+        fs::write(hot_root.join("a"), b"aaaaaaaaaa").unwrap();
+        fs::write(hot_root.join("b"), b"bbbbbbbbbb").unwrap();
+        let mut tier_state = TierState::new(hot_root.clone(), vec![cold_root.clone()], 15, vec![u64::MAX]);
+        tier_state.init_bytes().unwrap();
+        let mut policy = BasicLruPolicy::new(tier_state);
+
+        policy.reorganize().unwrap();
+        let (evicted_hot, evicted_cold) = if fs::symlink_metadata(hot_root.join("a"))
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            (hot_root.join("a"), cold_root.join("a"))
+        } else {
+            (hot_root.join("b"), cold_root.join("b"))
+        };
+        assert!(evicted_cold.exists(), "one file should be in cold");
+        let hot_after_first = policy.tier_state.hot_bytes();
+        let cold_after_first = policy.tier_state.cold_bytes(0);
+
+        // Simulate watcher events after our eviction: Create + Modify on cold path, Modify on hot (symlink).
+        let ts = SystemTime::now();
+        policy.ingest(&[
+            AccessEvent { path: evicted_cold.clone(), kind: FsEventKind::Create, timestamp: ts },
+            AccessEvent { path: evicted_cold.clone(), kind: FsEventKind::Modify, timestamp: ts },
+            AccessEvent { path: evicted_hot.clone(), kind: FsEventKind::Modify, timestamp: ts },
+        ]);
+        policy.reorganize().unwrap();
+
+        // We must not have re-promoted: evicted file still in cold, bytes unchanged.
+        assert!(
+            fs::symlink_metadata(&evicted_hot).map(|m| m.file_type().is_symlink()).unwrap_or(false),
+            "evicted path should still be symlink (no re-promote)"
+        );
+        assert_eq!(policy.tier_state.hot_bytes(), hot_after_first, "hot bytes should not change");
+        assert_eq!(policy.tier_state.cold_bytes(0), cold_after_first, "cold bytes should not change");
     }
 }
