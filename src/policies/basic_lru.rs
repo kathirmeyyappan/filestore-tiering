@@ -2,6 +2,7 @@
 //! Any touch promotes to hot; evict from oldest-in-hot to cold until under capacity.
 //! In-place file growth is tracked via per-file size map: on Modify, we diff old vs new size and
 //! call adjust_hot_bytes so hot_bytes stays accurate without a full rescan.
+//! Between polls, hot can briefly exceed the limit (e.g. in-place growth); we correct it on the next reorganize.
 
 use std::collections::{HashMap, VecDeque};
 use std::fs;
@@ -69,7 +70,7 @@ impl PolicyEngine for BasicLruPolicy {
     fn ingest(&mut self, events: &[AccessEvent]) {
         for event in events {
             if event.kind == FsEventKind::Modify {
-                // If a hot file was modified in place, update hot_bytes by the size delta.
+                // Hot file modified in place: apply size delta so tier count stays correct.
                 if let Some(&old_size) = self.hot_sizes.get(&event.path) {
                     if let Ok(new_size) = fs::metadata(&event.path).map(|m| m.len()) {
                         self.tier_state.adjust_hot_bytes(old_size, new_size);
@@ -85,7 +86,7 @@ impl PolicyEngine for BasicLruPolicy {
         let hot_root = self.tier_state.hot_root().to_path_buf();
         let cold = self.cold_root().to_path_buf();
 
-        // Initialize queue with all files in hot tier and record their sizes.
+        // First run: seed queue and hot_sizes from disk. tier_state.hot_bytes already set by init_bytes().
         if self.queue.is_empty() {
             for path in Self::list_regular_files_under(&hot_root)? {
                 if let Ok(size) = fs::metadata(&path).map(|m| m.len()) {
@@ -95,7 +96,7 @@ impl PolicyEngine for BasicLruPolicy {
             }
         }
 
-        // Process touched paths oldest-first so we evict and add in time order.
+        // Process touches oldest-first so evictions and promotions respect event order.
         self.touched.sort_by(|a, b| a.1.cmp(&b.1));
         for (path, _) in self.touched.drain(..) {
             if !path.starts_with(&hot_root) {
@@ -104,6 +105,7 @@ impl PolicyEngine for BasicLruPolicy {
             let meta = match fs::symlink_metadata(&path) {
                 Ok(m) => m,
                 Err(_) => {
+                    // Path gone: drop from our state and correct hot_bytes if we had a size.
                     if let Some(old) = self.hot_sizes.remove(&path) {
                         self.tier_state.adjust_hot_bytes(old, 0);
                     }
@@ -112,7 +114,7 @@ impl PolicyEngine for BasicLruPolicy {
                 }
             };
             if meta.file_type().is_symlink() {
-                // In cold: evict from back (oldest) until there’s room, then promote.
+                // PATH IN COLD: make room, then promote to hot.
                 let need = fs::read_link(&path)
                     .ok()
                     .and_then(|t| {
@@ -132,6 +134,7 @@ impl PolicyEngine for BasicLruPolicy {
                     } else if let Some(old) = self.hot_sizes.remove(&back) {
                         self.tier_state.adjust_hot_bytes(old, 0);
                     }
+                    // If back is gone (deleted or smn) and not in hot_sizes, we can't fix hot_bytes here; it stays high until next init_bytes.
                 }
                 if self.tier_state.hot_bytes_left() < need {
                     return Err(format!(
@@ -140,18 +143,17 @@ impl PolicyEngine for BasicLruPolicy {
                     )
                     .into());
                 }
-                self.tier_state.move_to_tier(&path, &hot_root)?;
-                if let Ok(size) = fs::metadata(&path).map(|m| m.len()) {
-                    if size > 0 {
-                        self.tier_state.adjust_hot_bytes(0, size);
-                        self.tier_state.adjust_cold_bytes(0, size, 0);
-                    }
-                    self.hot_sizes.insert(path.clone(), size);
+                let moved = self.tier_state.move_to_tier(&path, &hot_root)?;
+                let size = fs::metadata(&path).map(|m| m.len()).unwrap_or(moved);
+                if size > 0 {
+                    self.tier_state.adjust_hot_bytes(0, size);
+                    self.tier_state.adjust_cold_bytes(0, size, 0);
                 }
+                self.hot_sizes.insert(path.clone(), size);
                 self.queue.retain(|p| p != &path);
                 self.queue.push_front(path);
             } else if meta.is_file() {
-                // In hot: ensure size is tracked (new files created after startup), then move to front (MRU).
+                // PATH IN HOT: track size if new (e.g. created after startup), then move to front (MRU).
                 if !self.hot_sizes.contains_key(&path) {
                     if let Ok(size) = fs::metadata(&path).map(|m| m.len()) {
                         self.tier_state.adjust_hot_bytes(0, size);
@@ -163,7 +165,8 @@ impl PolicyEngine for BasicLruPolicy {
             }
         }
 
-        // Evict from back until under hot capacity.
+        // Between polls we may have crossed the limit (e.g. in-place growth) because of Modify events; can't be avoided.
+        // Evict LRU from back until hot is at or under capacity.
         while self.tier_state.hot_bytes_left() == 0 {
             let Some(back) = self.queue.pop_back() else { break };
             if back.exists() {
@@ -176,6 +179,7 @@ impl PolicyEngine for BasicLruPolicy {
             } else if let Some(old) = self.hot_sizes.remove(&back) {
                 self.tier_state.adjust_hot_bytes(old, 0);
             }
+            // Back gone and not in hot_sizes: hot_bytes stays high until next init_bytes.
         }
 
         Ok(())
