@@ -199,6 +199,11 @@ fn make_policy(
 
     // New policy: add a mod in policies/mod.rs, then add a match arm here (key = --policy value).
     match name {
+        "basic_lru" => {
+            policies::basic_lru::BasicLruPolicy::validate_config(hot_storage, cold_storage)
+                .map_err(to_err)?;
+            Ok(Box::new(policies::basic_lru::BasicLruPolicy::new(tier_state)))
+        }
         "dummy" => {
             policies::dummy::DummyPolicy::validate_config(hot_storage, cold_storage)
                 .map_err(to_err)?;

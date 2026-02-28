@@ -8,9 +8,12 @@
 //! **Tier sizes and limits:** In `reorganize` use `self.tier_state.hot_bytes()`,
 //! `self.tier_state.cold_bytes(i)`, `self.tier_state.hot_bytes_left()`,
 //! `self.tier_state.cold_bytes_left(i)`, and `self.tier_state.move_to_tier(hot_path, target_dir)`.
+//! **Important:** `move_to_tier` only performs the filesystem move; when it returns a non-zero size,
+//! the policy must call `adjust_hot_bytes` and/or `adjust_cold_bytes` to keep tier state accurate.
 //!
 //! Add `#[derive(Debug)]` to your policy struct for logging and debugging.
 
+pub mod basic_lru;
 pub mod dummy;
 // pub mod lru_2q;
 // pub mod lfu;

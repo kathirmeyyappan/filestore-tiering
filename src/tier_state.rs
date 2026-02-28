@@ -1,8 +1,9 @@
 //! Tier paths and byte accounting. Policies hold a `TierState` and use it in `reorganize`
-//! to move files and query sizes/capacity.
+//! to move files and query sizes/capacity. Byte counts are updated by the policy: `init_bytes`
+//! at startup, and `adjust_hot_bytes` / `adjust_cold_bytes` after each move (since `move_to_tier`
+//! only performs the filesystem move).
 
 use std::error::Error;
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::tier_fs;
@@ -78,6 +79,20 @@ impl TierState {
         self.hot_capacity.saturating_sub(self.hot_bytes)
     }
 
+    /// Adjust hot byte count by a size change (old_size → new_size) for an in-place file edit.
+    /// Call when a hot file grows or shrinks without being moved.
+    pub fn adjust_hot_bytes(&mut self, old_size: u64, new_size: u64) {
+        self.hot_bytes = self.hot_bytes.saturating_sub(old_size).saturating_add(new_size);
+    }
+
+    /// Adjust cold tier byte count by a size change (old_size → new_size) for an in-place file edit.
+    /// Call when a file in cold tier `i` grows or shrinks without being moved. No-op if `i` is out of range.
+    pub fn adjust_cold_bytes(&mut self, i: usize, old_size: u64, new_size: u64) {
+        if let Some(used) = self.cold_bytes.get_mut(i) {
+            *used = used.saturating_sub(old_size).saturating_add(new_size);
+        }
+    }
+
     /// Bytes remaining before the given cold tier reaches capacity.
     pub fn cold_bytes_left(&self, i: usize) -> u64 {
         let cap = self.cold_capacities.get(i).copied().unwrap_or(u64::MAX);
@@ -90,8 +105,10 @@ impl TierState {
     /// **What gets moved:** The actual file content (backing) for the logical path `hot_path`.
     /// Clients always use `hot_path` (e.g. `/hot/a/b`); this method only changes *where* the bytes
     /// live. After the call, `hot_path` still exists: either as a regular file (content at hot) or
-    /// as a symlink pointing into another tier. Internal byte counts (`hot_bytes`, `cold_bytes`) are
-    /// updated automatically; no need to pass `hot_root` — it's in this state.
+    /// as a symlink pointing into another tier.
+    ///
+    /// **Byte accounting:** This method does *not* update `hot_bytes` or `cold_bytes`. The caller
+    /// must update tier sizes after a move (e.g. via `adjust_hot_bytes` and `adjust_cold_bytes`).
     ///
     /// # Parameters
     ///
@@ -110,55 +127,18 @@ impl TierState {
     ///
     /// ```ignore
     /// let hot_path = self.tier_state.hot_root().join("foo/bar");
-    /// self.tier_state.move_to_tier(&hot_path, self.tier_state.cold_root(0).unwrap())?;  // evict
-    /// self.tier_state.move_to_tier(&hot_path, self.tier_state.hot_root())?;              // promote
+    /// let size = self.tier_state.move_to_tier(&hot_path, self.tier_state.cold_root(0).unwrap())?;
+    /// if size > 0 {
+    ///     self.tier_state.adjust_hot_bytes(size, 0);
+    ///     self.tier_state.adjust_cold_bytes(0, 0, size);
+    /// }
     /// ```
     pub fn move_to_tier(
         &mut self,
         hot_path: &Path,
         target_dir: &Path,
     ) -> Result<u64, Box<dyn Error + Send + Sync>> {
-        let cold_source_i = if target_dir == self.hot_root {
-            self.cold_index_containing(hot_path)
-        } else {
-            None
-        };
         let size = tier_fs::move_to_tier(&self.hot_root, hot_path, target_dir)?;
-        if size == 0 {
-            return Ok(0);
-        }
-        if target_dir == self.hot_root {
-            self.hot_bytes += size;
-            if let Some(i) = cold_source_i {
-                self.cold_bytes[i] = self.cold_bytes[i].saturating_sub(size);
-            }
-        } else if let Some(i) = self
-            .cold_roots
-            .iter()
-            .position(|r| r.as_path() == target_dir)
-        {
-            self.hot_bytes = self.hot_bytes.saturating_sub(size);
-            self.cold_bytes[i] += size;
-        }
         Ok(size)
-    }
-
-    fn cold_index_containing(&self, hot_path: &Path) -> Option<usize> {
-        let meta = fs::symlink_metadata(hot_path).ok()?;
-        if !meta.file_type().is_symlink() {
-            return None;
-        }
-        let target = fs::read_link(hot_path).ok()?;
-        let abs = if target.is_absolute() {
-            target
-        } else {
-            hot_path.parent().unwrap_or(Path::new("/")).join(target)
-        };
-        for (i, root) in self.cold_roots.iter().enumerate() {
-            if abs.starts_with(root) {
-                return Some(i);
-            }
-        }
-        None
     }
 }

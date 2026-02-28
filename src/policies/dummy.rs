@@ -21,7 +21,8 @@
 //! - `cold_root(i: usize) -> Option<&Path>` — cold tier i (0 = warmest).
 //! - `hot_bytes() -> u64`, `cold_bytes(i) -> u64` — current bytes in tier.
 //! - `hot_bytes_left() -> u64`, `cold_bytes_left(i) -> u64` — remaining until capacity.
-//! - `move_to_tier(hot_path: &Path, target_dir: &Path) -> Result<u64, ...>` — move backing to `target_dir` (use `hot_root()` to promote, `cold_root(i)` to evict); returns bytes moved or 0 if no-op.
+//! - `adjust_hot_bytes(old_size, new_size)`, `adjust_cold_bytes(i, old_size, new_size)` — update tier counts (call after a move or in-place file change).
+//! - `move_to_tier(hot_path: &Path, target_dir: &Path) -> Result<u64, ...>` — move backing to `target_dir` (use `hot_root()` to promote, `cold_root(i)` to evict); returns bytes moved or 0 if no-op. **Does not update tier counts;** after a non-zero return, call `adjust_hot_bytes` and `adjust_cold_bytes` as needed.
 //!
 //! **AccessEvent** (in `ingest`): `event.path` (`PathBuf`), `event.kind` (`FsEventKind`), `event.timestamp` (`SystemTime`).
 //! **FsEventKind**: `Create` | `Modify` | `Remove` | `Access` | `Other`.
@@ -79,14 +80,22 @@ impl PolicyEngine for DummyPolicy {
 
     /// Called every poll after ingest. Use `self.tier_state` for paths, sizes, capacity, and moves.
     ///
-    /// Evict to cold:
+    /// Evict to cold (then update tier counts):
     /// ```ignore
-    /// self.tier_state.move_to_tier(&hot_path, self.tier_state.cold_root(i).unwrap())?;
+    /// let size = self.tier_state.move_to_tier(&hot_path, self.tier_state.cold_root(i).unwrap())?;
+    /// if size > 0 {
+    ///     self.tier_state.adjust_hot_bytes(size, 0);
+    ///     self.tier_state.adjust_cold_bytes(i, 0, size);
+    /// }
     /// ```
     ///
-    /// Promote to hot:
+    /// Promote to hot (then update tier counts):
     /// ```ignore
-    /// self.tier_state.move_to_tier(&hot_path, self.tier_state.hot_root())?;
+    /// let size = self.tier_state.move_to_tier(&hot_path, self.tier_state.hot_root())?;
+    /// if size > 0 {
+    ///     self.tier_state.adjust_hot_bytes(0, size);
+    ///     self.tier_state.adjust_cold_bytes(source_cold_i, size, 0);
+    /// }
     /// ```
     ///
     /// Build `hot_path` under hot root:
@@ -105,13 +114,21 @@ impl PolicyEngine for DummyPolicy {
         // Example eviction:
         //
         // let hot_path = self.tier_state.hot_root().join("some/file");
-        //               if let Some(cold) = self.tier_state.cold_root(0) {
-        //                   let _n = self.tier_state.move_to_tier(&hot_path, cold)?;
-        //               }
+        // if let Some(cold) = self.tier_state.cold_root(0) {
+        //     let size = self.tier_state.move_to_tier(&hot_path, cold)?;
+        //     if size > 0 {
+        //         self.tier_state.adjust_hot_bytes(size, 0);
+        //         self.tier_state.adjust_cold_bytes(0, 0, size);
+        //     }
+        // }
         //
         // Example promotion:
         //
-        // self.tier_state.move_to_tier(&hot_path, self.tier_state.hot_root())?;
+        // let size = self.tier_state.move_to_tier(&hot_path, self.tier_state.hot_root())?;
+        // if size > 0 {
+        //     self.tier_state.adjust_hot_bytes(0, size);
+        //     self.tier_state.adjust_cold_bytes(0, size, 0);  // 0 = cold tier index if single cold tier
+        // }
         Ok(())
     }
 }
