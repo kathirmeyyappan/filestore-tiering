@@ -2,6 +2,7 @@
 name = "filestore-tiering"
 version = "0.1.0"
 edition = "2024"
+default-run = "filestore-tiering"
 
 [dependencies]
 anyhow = "1"
@@ -9,6 +10,12 @@ clap = { version = "4", features = ["derive"] }
 log = "0.4"
 env_logger = "0.11"
 notify = "7"
+rand = "0.8"
+tempfile = "3"
+
+[[bin]]
+name = "tiering_bench"
+path = "src/bin/tiering_bench.rs"
 
 [dev-dependencies]
 tempfile = "3"

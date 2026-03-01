@@ -5,7 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use crate::policy_engine::{AccessEvent, FsEventKind, PolicyEngine, TierState};
+use crate::policy_engine::{AccessEvent, FsEventKind, PolicyEngine, PolicyStats, TierState};
 use crate::policy_log;
 
 fn canonical(path: &Path) -> PathBuf {
@@ -24,12 +24,16 @@ pub struct BasicLruPolicy {
     hot_sizes: HashMap<PathBuf, u64>,
     cold_sizes: HashMap<PathBuf, u64>,
     touched: Vec<(PathBuf, SystemTime)>,
-    /// Paths we modified in the last reorganize (evicted or promoted). We ignore Create/Remove for these on the next poll so we don't react to our own moves; Modify still counts so user edits are seen.
+    /// Paths we modified in the last reorganize (evicted or promoted).
     last_modified: HashSet<PathBuf>,
+    total_promotions: u64,
+    total_demotions: u64,
+    demotions_to_tier: Vec<u64>,
 }
 
 impl BasicLruPolicy {
     pub fn new(tier_state: TierState) -> Self {
+        let n_cold = 1;
         Self {
             tier_state,
             queue: VecDeque::new(),
@@ -37,6 +41,9 @@ impl BasicLruPolicy {
             cold_sizes: HashMap::new(),
             touched: Vec::new(),
             last_modified: HashSet::new(),
+            total_promotions: 0,
+            total_demotions: 0,
+            demotions_to_tier: vec![0; n_cold],
         }
     }
 
@@ -168,7 +175,7 @@ impl PolicyEngine for BasicLruPolicy {
                 }
                 true
             })
-            .map(|e| (e.path.clone(), e.timestamp))
+            .map(|e| (canonical(&e.path), e.timestamp))
             .collect();
         policy_log::log_ingest("basic_lru", events.len());
     }
@@ -314,6 +321,8 @@ impl PolicyEngine for BasicLruPolicy {
                         self.last_modified.insert(canonical(&back));
                         self.last_modified.insert(canonical(&cold_path));
                         evicted_room += 1;
+                        self.total_demotions += 1;
+                        self.demotions_to_tier[0] += 1;
                     } else if let Some(old) = self.hot_sizes.remove(&back) {
                         self.tier_state.adjust_hot_bytes(old, 0);
                     } else if self.cold_sizes.remove(&back).is_some() {
@@ -348,6 +357,7 @@ impl PolicyEngine for BasicLruPolicy {
                     self.last_modified.insert(canonical(cb));
                 }
                 promoted += 1;
+                self.total_promotions += 1;
                 self.queue.push_front(path);
             } else {
                 // Path in hot (regular file): track size if new, then move to front (MRU).
@@ -384,6 +394,8 @@ impl PolicyEngine for BasicLruPolicy {
                 self.last_modified.insert(canonical(&back));
                 self.last_modified.insert(canonical(&cold_path));
                 evicted += 1;
+                self.total_demotions += 1;
+                self.demotions_to_tier[0] += 1;
             } else if let Some(old) = self.hot_sizes.remove(&back) {
                 self.tier_state.adjust_hot_bytes(old, 0);
             } else if self.cold_sizes.remove(&back).is_some() {
@@ -405,6 +417,14 @@ impl PolicyEngine for BasicLruPolicy {
         }
 
         Ok(())
+    }
+
+    fn stats(&self) -> PolicyStats {
+        PolicyStats {
+            promotions: self.total_promotions,
+            demotions: self.total_demotions,
+            demotions_to_tier: self.demotions_to_tier.clone(),
+        }
     }
 }
 

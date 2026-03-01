@@ -2,7 +2,7 @@
 
 This document is the **primary reference for anyone (human or agent) implementing a new policy from scratch**. It describes exactly what the `basic_lru` policy implements and **every complexity and gotcha** encountered. Read it before writing a new policy so you can reuse patterns and avoid the same pitfalls. More complex policies will need to address all of these (paths, byte accounting, renames, reconciliation, touch filter, loop prevention).
 
-**How to use this doc:** Read §9 first for a compact list of what every new policy must handle. Then work through §1–§8 for details and §10 for renames. Use the checklist in §8 as a final pass before you ship.
+**How to use this doc:** Read §9 first for a compact list of what every new policy must handle. Then work through §1–§8 for details, §10 for renames, and §12 for benchmark compliance. Use the checklist in §8 as a final pass before you ship.
 
 ---
 
@@ -167,6 +167,7 @@ When implementing a new policy (e.g. another eviction strategy), use this list s
 - [ ] **Test "no loop":** Add a test that, after one reorganize that evicts a file, ingests the exact event pattern the watcher would send (Create+Modify on cold, Modify on hot symlink), runs reorganize again, and asserts no re-promotion and stable hot/cold bytes. This would have caught the basic_lru loop.
 - [ ] **Main loop order:** Your `ingest` sees `last_modified` from the **previous** reorganize because the runner clears nothing between ingest and reorganize; we clear `last_modified` at the **start** of reorganize. Design your filter with that in mind.
 - [ ] **Renames:** See §10. We do not detect rename (Remove + Create). **cold_bytes** must only be subtracted when content actually leaves cold (promote or cold backing file gone); never subtract when you merely drop a hot path from your map (Remove or reconcile). Otherwise renames can drive cold_bytes to zero while content still exists in cold.
+- [ ] **Benchmark compliance:** If you want the benchmark (`tiering_bench`, `scripts/bench_eval.sh`) to report move counts for your policy, implement `stats(&self) -> PolicyStats`: track total promotions and demotions (and `demotions_to_tier` per cold tier). Increment on every successful promote and on every evict to cold. The trait default returns zeros; policies that never move (e.g. dummy) are still runnable by the bench but will show 0 promotions/demotions. See §12.
 
 ---
 
@@ -190,6 +191,7 @@ Every new policy that moves files between hot and cold and reacts to watcher eve
 | When making room for promotion, don't evict the path you're promoting | Otherwise we evict the file we're trying to promote | §8 checklist |
 | Clear last_modified at **start** of reorganize | So next ingest sees previous reorganize's paths | §5 |
 | Eviction when back is gone: adjust only hot_sizes, not cold_bytes | Backing may still be in cold | §8 checklist |
+| Implement `stats()` for benchmarking | So tiering_bench and bench_eval.sh can report promotions/demotions | §12 |
 
 ---
 
@@ -225,6 +227,18 @@ If a policy **does** use `cold_bytes` or `cold_bytes_left()` for decisions (e.g.
 
 ---
 
+## 12. Benchmark Compliance (Being Complicit with the Bench)
+
+The benchmark (`tiering_bench` binary and `scripts/bench_eval.sh`) runs a synthetic create/delete/edit workload for a **fixed time**: a warmup phase, then a measurement window. It reports **throughput** (ops/s during the measure window) and **policy stats** (promotions, demotions during that window, and as % of ops). To make your policy evaluable by the bench, you must be **complicit**: report accurate move counts so that comparisons across policies (and across runs, e.g. hot vs cold on external drive) are meaningful.
+
+**What the bench expects:** The trait `PolicyEngine` has `fn stats(&self) -> PolicyStats` with a default that returns zeros. If your policy moves files (promote or evict), override it and return real counts. `PolicyStats` has: `promotions` (total cold-to-hot moves), `demotions` (total hot-to-cold moves), and `demotions_to_tier: Vec<u64>` (one per cold tier). For basic_lru we have one cold tier so `demotions_to_tier.len() == 1`.
+
+**What you must do:** (1) Add fields to your policy (e.g. `total_promotions: u64`, `total_demotions: u64`, `demotions_to_tier: Vec<u64>`). (2) Increment them whenever you perform a promote or evict (after a successful `move_to_tier` that returns non-zero size). (3) Implement `fn stats(&self) -> PolicyStats` to return those values. Do not rely on the default if you move files — the bench would then report 0 moves and comparisons would be misleading.
+
+**Why it matters:** When cold is on a slow device, more promotions/demotions can mean slower runs; the bench reports both throughput and move counts. Accurate stats let you compare policies fairly. Reference: `basic_lru` implements `stats()` and increments on every promote and on every evict (both in the make-room loop and in the over-capacity evict loop).
+
+---
+
 ## 11. File Layout Reference
 
 - **Policy trait and events:** `src/policy_engine.rs` (`PolicyEngine`, `AccessEvent`, `FsEventKind`).
@@ -233,7 +247,8 @@ If a policy **does** use `cold_bytes` or `cold_bytes_left()` for decisions (e.g.
 - **basic_lru implementation:** `src/policies/basic_lru.rs`.
 - **Runner:** `src/main.rs` (poll → ingest → reorganize).
 - **Watcher:** `src/watcher.rs` (paths come from notify; can be relative or absolute; policy canonicalizes).
+- **Benchmark:** `src/bin/tiering_bench.rs` (CLI); workload and stats in `src/bench/workload.rs`. Script: `scripts/bench_eval.sh`.
 
 ---
 
-**Using this document:** Work through §9 and §8 checklist when implementing a new policy. Use §1–§7 and §10 for the reasoning and edge cases. Together with the code, this covers the detailed complexities so your implementation avoids drift, infinite loops, wrong cold_bytes, and incorrect handling of renames and self-modified paths.
+**Using this document:** Work through §9 and §8 checklist when implementing a new policy. Use §1–§7 and §10 for the reasoning and edge cases; §12 for benchmark compliance (stats, promotions/demotions). Together with the code, this covers the detailed complexities so your implementation avoids drift, infinite loops, wrong cold_bytes, incorrect handling of renames and self-modified paths, and is evaluable by the benchmark.
