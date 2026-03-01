@@ -1,5 +1,6 @@
 mod policies;
 mod policy_engine;
+mod policy_log;
 mod tier_fs;
 mod tier_state;
 mod watcher;
@@ -90,7 +91,11 @@ struct Cli {
 }
 
 fn main() -> Result<()> {
-    env_logger::init();
+    use log::LevelFilter;
+    env_logger::Builder::new()
+        .filter_level(LevelFilter::Info)
+        .parse_default_env()
+        .init();
     let cli = Cli::parse();
 
     ensure_dir_exists(&cli.hot_storage, "hot_storage")?;
@@ -112,7 +117,10 @@ fn main() -> Result<()> {
         cold_caps,
     )?;
 
-    let fs_watcher = FsWatcher::new(&cli.hot_storage)?;
+    let watch_dirs: Vec<PathBuf> = std::iter::once(cli.hot_storage.clone())
+        .chain(cli.cold_storage.iter().cloned())
+        .collect();
+    let fs_watcher = FsWatcher::new(&watch_dirs)?;
 
     log::info!(
         "watching {:?}  cold_storage={:?}  hot_capacity={}  cold_capacities=[{}]  policy={}  interval={}s",
@@ -189,16 +197,24 @@ fn make_policy(
     cold_capacities: Vec<u64>,
 ) -> Result<Box<dyn policy_engine::PolicyEngine>> {
     let to_err = |e: Box<dyn std::error::Error + Send + Sync>| anyhow::anyhow!("{}", e);
-    let mut tier_state = TierState::new(
-        hot_storage.to_path_buf(),
-        cold_storage.to_vec(),
-        hot_capacity,
-        cold_capacities,
-    );
+    let hot_root = std::fs::canonicalize(hot_storage).map_err(|e| to_err(e.into()))?;
+    let cold_roots: Vec<PathBuf> = cold_storage
+        .iter()
+        .map(|p| std::fs::canonicalize(p).map_err(|e| to_err(e.into())))
+        .collect::<Result<_, _>>()?;
+    let mut tier_state =
+        TierState::new(hot_root.clone(), cold_roots, hot_capacity, cold_capacities);
     tier_state.init_bytes().map_err(to_err)?;
 
     // New policy: add a mod in policies/mod.rs, then add a match arm here (key = --policy value).
     match name {
+        "basic_lru" => {
+            policies::basic_lru::BasicLruPolicy::validate_config(hot_storage, cold_storage)
+                .map_err(to_err)?;
+            Ok(Box::new(policies::basic_lru::BasicLruPolicy::new(
+                tier_state,
+            )))
+        }
         "dummy" => {
             policies::dummy::DummyPolicy::validate_config(hot_storage, cold_storage)
                 .map_err(to_err)?;

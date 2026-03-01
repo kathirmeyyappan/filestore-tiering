@@ -14,8 +14,8 @@ pub struct FsWatcher {
 }
 
 impl FsWatcher {
-    /// Initialize on 'dir', and begin watching it for file-access events.
-    pub fn new(dir: &Path) -> Result<Self> {
+    /// Watch all given directories and collect file events from any of them.
+    pub fn new(dirs: &[impl AsRef<Path>]) -> Result<Self> {
         let (tx, rx) = mpsc::channel();
 
         let mut watcher = notify::recommended_watcher(move |ev| {
@@ -23,9 +23,11 @@ impl FsWatcher {
         })
         .context("failed to create FS watcher")?;
 
-        watcher
-            .watch(dir, RecursiveMode::Recursive)
-            .context("failed to start watching directory")?;
+        for dir in dirs {
+            watcher
+                .watch(dir.as_ref(), RecursiveMode::Recursive)
+                .context("failed to start watching directory")?;
+        }
 
         Ok(Self {
             _watcher: watcher,

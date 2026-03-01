@@ -12,7 +12,6 @@ use std::path::{Path, PathBuf};
 /// - **`target_dir`** — Where the backing should live: if equal to `hot_root`, backing moves to `hot_path` (promote); otherwise backing moves to `target_dir/rel` and `hot_path` becomes a symlink (evict).
 ///
 /// Returns size in bytes moved, or 0 if no-op.
-#[allow(dead_code)]
 pub fn move_to_tier(
     hot_root: &Path,
     hot_path: &Path,

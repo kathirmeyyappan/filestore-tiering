@@ -15,7 +15,6 @@ pub enum FsEventKind {
 }
 
 /// A single filesystem event observed by the watcher.
-#[allow(dead_code)]
 #[derive(Debug)]
 pub struct AccessEvent {
     pub path: PathBuf,
@@ -45,6 +44,8 @@ pub trait PolicyEngine {
 
     /// Examine internal state and perform any file migrations
     /// (promotions / evictions) between hot, warm, and cold tiers.
-    /// Tier state is held inside the engine; use `self.tier_state` (or equivalent) for promotion/demotion and byte queries.
+    /// Tier state is held inside the engine; use `self.tier_state` (or equivalent) for paths,
+    /// capacity, and `move_to_tier`. After each move that returns a non-zero size, the policy
+    /// must call `adjust_hot_bytes` and/or `adjust_cold_bytes` to keep tier byte counts correct.
     fn reorganize(&mut self) -> Result<(), Box<dyn Error + Send + Sync>>;
 }
