@@ -49,6 +49,20 @@ struct Cli {
     #[arg(long, default_value_t = 1)]
     batch_size: usize,
 
+    /// Edit target skew: 1.0 = uniform random, higher = concentrated on a hot subset.
+    /// E.g. 2.0 → ~64% of edits hit ~20% of files; 3.0 → ~80% hit ~20%.
+    #[arg(long, default_value_t = 1.0)]
+    skew: f64,
+
+    /// Hot-tier per-op I/O delay in microseconds. Simulates hot storage latency. 0 = no delay.
+    #[arg(long, default_value_t = 0)]
+    hot_delay_us: u64,
+
+    /// Cold-tier per-move I/O delay in microseconds. Applied per promote/demote to simulate
+    /// slow cold storage. 0 = no delay.
+    #[arg(long, default_value_t = 0)]
+    cold_delay_us: u64,
+
     #[arg(long)]
     header: bool,
 
@@ -77,6 +91,9 @@ fn main() -> Result<()> {
         delete_pct: cli.delete_pct,
         edit_pct: cli.edit_pct,
         batch_size: cli.batch_size,
+        skew: cli.skew,
+        hot_delay_us: cli.hot_delay_us,
+        cold_delay_us: cli.cold_delay_us,
     };
 
     let result = run(config)?;
