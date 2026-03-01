@@ -195,9 +195,7 @@ impl PolicyEngine for BasicLruPolicy {
         }
         for (p, sz) in to_drop {
             self.cold_sizes.remove(&p);
-            let rel = p
-                .strip_prefix(&hot_root)
-                .unwrap_or_else(|_| Path::new(""));
+            let rel = p.strip_prefix(&hot_root).unwrap_or_else(|_| Path::new(""));
             let cold_backing = cold.join(rel);
             if fs::metadata(&cold_backing).is_err() {
                 self.tier_state.adjust_cold_bytes(0, sz, 0);
@@ -226,12 +224,11 @@ impl PolicyEngine for BasicLruPolicy {
         // First run: seed queue and hot_sizes from disk (tier_state.hot_bytes already set by init_bytes).
         if self.queue.is_empty() {
             for p in Self::list_hot_files(&hot_root, &hot_root)? {
-                if let Ok(meta) = fs::symlink_metadata(&p) {
-                    if !meta.file_type().is_symlink()
-                        && let Ok(sz) = fs::metadata(&p).map(|m| m.len())
-                    {
-                        self.hot_sizes.insert(p.clone(), sz);
-                    }
+                if let Ok(meta) = fs::symlink_metadata(&p)
+                    && !meta.file_type().is_symlink()
+                    && let Ok(sz) = fs::metadata(&p).map(|m| m.len())
+                {
+                    self.hot_sizes.insert(p.clone(), sz);
                 }
                 self.queue.push_back(p);
             }
