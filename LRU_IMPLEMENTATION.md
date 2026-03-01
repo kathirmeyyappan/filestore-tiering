@@ -167,7 +167,7 @@ When implementing a new policy (e.g. another eviction strategy), use this list s
 - [ ] **Test "no loop":** Add a test that, after one reorganize that evicts a file, ingests the exact event pattern the watcher would send (Create+Modify on cold, Modify on hot symlink), runs reorganize again, and asserts no re-promotion and stable hot/cold bytes. This would have caught the basic_lru loop.
 - [ ] **Main loop order:** Your `ingest` sees `last_modified` from the **previous** reorganize because the runner clears nothing between ingest and reorganize; we clear `last_modified` at the **start** of reorganize. Design your filter with that in mind.
 - [ ] **Renames:** See §10. We do not detect rename (Remove + Create). **cold_bytes** must only be subtracted when content actually leaves cold (promote or cold backing file gone); never subtract when you merely drop a hot path from your map (Remove or reconcile). Otherwise renames can drive cold_bytes to zero while content still exists in cold.
-- [ ] **Benchmark compliance:** If you want the benchmark (`tiering_bench`, `scripts/bench_eval.sh`) to report move counts for your policy, implement `stats(&self) -> PolicyStats`: track total promotions and demotions (and `demotions_to_tier` per cold tier). Increment on every successful promote and on every evict to cold. The trait default returns zeros; policies that never move (e.g. dummy) are still runnable by the bench but will show 0 promotions/demotions. See §12.
+- [ ] **Benchmark compliance:** If you want the benchmark (`tiering_bench`, `scripts/bench_eval.sh`) to report move counts for your policy, follow the bench-compliant rules in §12.1: implement `stats(&self) -> PolicyStats`, track and increment promotions/demotions (and `demotions_to_tier` per cold tier), and use canonical paths in event-derived state (e.g. `touched`) so the bench can trigger evictions. The trait default returns zeros; policies that never move (e.g. dummy) are still runnable by the bench but will show 0 promotions/demotions.
 
 ---
 
@@ -191,7 +191,7 @@ Every new policy that moves files between hot and cold and reacts to watcher eve
 | When making room for promotion, don't evict the path you're promoting | Otherwise we evict the file we're trying to promote | §8 checklist |
 | Clear last_modified at **start** of reorganize | So next ingest sees previous reorganize's paths | §5 |
 | Eviction when back is gone: adjust only hot_sizes, not cold_bytes | Backing may still be in cold | §8 checklist |
-| Implement `stats()` for benchmarking | So tiering_bench and bench_eval.sh can report promotions/demotions | §12 |
+| Implement `stats()` and follow §12.1 for benchmarking | So tiering_bench and bench_eval.sh can report promotions/demotions | §12, §12.1 |
 
 ---
 
@@ -237,9 +237,26 @@ The benchmark (`tiering_bench` binary and `scripts/bench_eval.sh`) runs a synthe
 
 **Why it matters:** When cold is on a slow device, more promotions/demotions can mean slower runs; the bench reports both throughput and move counts. Accurate stats let you compare policies fairly. Reference: `basic_lru` implements `stats()` and increments on every promote and on every evict (both in the make-room loop and in the over-capacity evict loop).
 
----
+### 12.1 Bench-compliant rules for policy implementation
 
-## 11. File Layout Reference
+Follow these so your policy works correctly with the benchmark and reports meaningful move counts:
+
+1. **Implement `stats()`.** Override `fn stats(&self) -> PolicyStats`. Return `PolicyStats { promotions, demotions, demotions_to_tier }` with length of `demotions_to_tier` equal to the number of cold tiers. The trait default returns zeros; policies that never move (e.g. dummy) can keep the default and will show 0 promotions/demotions.
+
+2. **Track and increment move counts.** Maintain `total_promotions: u64`, `total_demotions: u64`, and `demotions_to_tier: Vec<u64>` (one element per cold tier). Increment:
+   - **On every successful promotion:** `total_promotions += 1` (after `move_to_tier(..., hot_root)` returns non-zero size).
+   - **On every successful demotion:** `total_demotions += 1` and `demotions_to_tier[tier_index] += 1` (after `move_to_tier(..., cold_root(i))` returns non-zero size).
+   Do **not** increment when the path is gone (e.g. you skip the move and only adjust maps/bytes).
+
+3. **Use canonical paths in event-derived state.** The benchmark (and daemon) compare paths against `hot_root` (canonical). If you store **raw** event paths in `touched` (or any set/map used in reorganize), `path.starts_with(&hot_root)` can fail and you never add to `hot_sizes` / queue, so capacity is never exceeded and demotions stay zero. **Store canonical paths** in `touched` and in any structure that you later compare to `hot_root` (e.g. in ingest: `touched = events.filter(...).map(|e| (canonical(&e.path), e.timestamp)).collect()`). See §2.
+
+4. **Match the runner contract.** The bench (and daemon) call `ingest(events)` then `reorganize()` each poll. Your `reorganize` must run after ingest without an extra ingest in between. Keep `last_modified` and clear it at the **start** of reorganize so the next ingest sees paths from the previous reorganize (§5, §8).
+
+5. **Optional: support small hot capacity.** The bench uses a small hot capacity (e.g. 20K or 5K) so that creates exceed capacity and trigger evictions. If your policy ignores capacity or never evicts, the bench will still run but demotions will be zero; that is acceptable for non-tiering policies (e.g. dummy).
+
+**Checklist reference:** §8 includes a "Benchmark compliance" item; use §12.1 as the detailed rules to satisfy it.
+
+---
 
 - **Policy trait and events:** `src/policy_engine.rs` (`PolicyEngine`, `AccessEvent`, `FsEventKind`).
 - **Tier state and move API:** `src/tier_state.rs` (`TierState`, `move_to_tier`, `adjust_hot_bytes`, `adjust_cold_bytes`, `init_bytes`).

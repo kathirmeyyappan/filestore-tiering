@@ -72,9 +72,9 @@ By default the benchmark prints a **human-readable summary** (measure_ops, throu
 | `--depth` | `-d` | Directory nesting depth under hot (default: 3) |
 | `--hot-capacity` | — | Hot tier capacity; default 20K gives ~40 files so creates exceed it and cause turnover (same units as daemon) |
 | `--file-size` | — | Bytes per created file (default: 500) |
-| `--create-pct` | — | Weight for create 0–100 (default: 40) |
-| `--delete-pct` | — | Weight for delete 0–100 (default: 30) |
-| `--edit-pct` | — | Weight for edit 0–100 (default: 30) |
+| `--create-pct` | — | Weight for create 0–100 (default: 50) |
+| `--delete-pct` | — | Weight for delete 0–100 (default: 0) |
+| `--edit-pct` | — | Weight for edit 0–100 (default: 50) |
 | `--csv` | — | Output one CSV line (for scripts); default is a readable summary |
 | `--header` | — | Print CSV header line only (for scripts) |
 
@@ -97,6 +97,8 @@ Supported env vars: `POLICIES`, `WARMUP_SEC`, `MEASURE_SEC`, `POLL_INTERVAL_SEC`
 
 ## Adding a new policy
 
+For a **minimal** policy (e.g. no tiering), copy `src/policies/dummy.rs` and wire it up. For a **tiering** policy (hot/cold moves, events, eviction), read **`LRU_IMPLEMENTATION.md`** first: it defines path canonicalization, byte accounting, touch filters, loop prevention, and **benchmark compliance** (§12 and §12.1) so your policy works with the benchmark and reports promotions/demotions correctly.
+
 1. **Create a module** under `src/policies/`, e.g. `src/policies/my_policy.rs`.
 
 2. **Declare it** in `src/policies/mod.rs`:
@@ -105,26 +107,25 @@ Supported env vars: `POLICIES`, `WARMUP_SEC`, `MEASURE_SEC`, `POLL_INTERVAL_SEC`
    ```
 
 3. **Implement the policy:**
-   - A struct that holds `hot_storage: PathBuf` and `cold_storage: Vec<PathBuf>`.
-   - A `new(hot_storage: PathBuf, cold_storage: Vec<PathBuf>) -> Self` that stores them.
+   - A struct that holds **`tier_state: TierState`** (hot/cold roots, capacities, and byte counts are inside `TierState`; the daemon builds it and calls `init_bytes()` before passing it to your policy).
+   - A constructor `new(tier_state: TierState) -> Self` that stores it.
    - `impl PolicyEngine for MyPolicy` with:
      - `validate_config(hot, cold_storage)` — return `Err(...)` if the config is invalid (e.g. wrong number of cold tiers). Optional; default accepts any config.
-     - `ingest(&mut self, events: &[AccessEvent])` — process new filesystem events (path, kind, timestamp).
-     - `reorganize(&mut self) -> Result<(), Box<dyn Error + Send + Sync>>` — run your logic (e.g. count bytes, move files, update symlinks). Use `self.hot_storage` and `self.cold_storage` and `std::fs` as needed.
+     - `ingest(&mut self, events: &[AccessEvent])` — process new filesystem events (path, kind, timestamp). Use **canonical** paths when storing event-derived state (e.g. `touched`) so reorganize can match `hot_root`; see `LRU_IMPLEMENTATION.md` §2 and §12.1.
+     - `reorganize(&mut self) -> Result<(), Box<dyn Error + Send + Sync>>` — run your logic (evict/promote, update queue, call `tier_state.move_to_tier` and `adjust_hot_bytes` / `adjust_cold_bytes`). Use `self.tier_state.hot_root()`, `cold_root(i)`, and `std::fs` as needed.
+   - **Bench compliance:** Override `fn stats(&self) -> PolicyStats` and track promotions/demotions so `tiering_bench` can report move counts. See `LRU_IMPLEMENTATION.md` §12 and §12.1.
 
 4. **Wire it up in `src/daemon.rs`** inside `make_policy()`:
    ```rust
    "my_policy" => {
-       policies::my_policy::MyPolicy::validate_config(hot_storage, cold_storage).map_err(to_err)?;
-       Ok(Box::new(policies::my_policy::MyPolicy::new(
-           hot_storage.to_path_buf(),
-           cold_storage.to_vec(),
-       )))
+       crate::policies::my_policy::MyPolicy::validate_config(hot_storage, cold_storage).map_err(to_err)?;
+       Ok(Box::new(crate::policies::my_policy::MyPolicy::new(tier_state)))
    }
    ```
 
-5. **Implement `stats()` for benchmarking** (optional but recommended): Override `fn stats(&self) -> PolicyStats` to return promotion and demotion counts so `tiering_bench` and `scripts/bench_eval.sh` can report move counts. See “Benchmarking” above and the “Benchmark compliance” section in `LRU_IMPLEMENTATION.md`.
 
-6. Run with `--policy my_policy`.
+   Policies receive a single `TierState` (hot/cold already canonicalized, `init_bytes()` already called).
 
-Use `src/policies/dummy.rs` as a minimal reference.
+5. Run with `--policy my_policy`.
+
+Use `src/policies/dummy.rs` as a minimal reference and `src/policies/basic_lru.rs` plus **`LRU_IMPLEMENTATION.md`** for a full tiering implementation and bench-compliant rules.
