@@ -45,6 +45,11 @@ pub fn make_policy(
                 tier_state,
             )))
         }
+        "arc" => {
+            crate::policies::arc::ArcPolicy::validate_config(hot_storage, cold_storage)
+                .map_err(to_err)?;
+            Ok(Box::new(crate::policies::arc::ArcPolicy::new(tier_state)))
+        }
         "dummy" => {
             crate::policies::dummy::DummyPolicy::validate_config(hot_storage, cold_storage)
                 .map_err(to_err)?;
