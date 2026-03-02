@@ -17,6 +17,7 @@
 //!
 //! Add `#[derive(Debug)]` to your policy struct for logging and debugging.
 
+pub mod arc;
 pub mod basic_lru;
 pub mod dummy;
 // pub mod lru_2q;
