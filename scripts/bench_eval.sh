@@ -10,7 +10,7 @@ cd "$(dirname "$0")/.."
 
 # Defaults (override with env)
 # Hardcode known policies; override with POLICIES env if needed.
-POLICIES="${POLICIES:-basic_lru arc}"
+POLICIES="${POLICIES:-basic_lru arc lfu}"
 WARMUP_SEC="${WARMUP_SEC:-5}"
 MEASURE_SEC="${MEASURE_SEC:-30}"
 POLL_INTERVAL_SEC="${POLL_INTERVAL_SEC:-0.2}"

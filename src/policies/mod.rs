@@ -20,5 +20,5 @@
 pub mod arc;
 pub mod basic_lru;
 pub mod dummy;
+pub mod lfu;
 // pub mod lru_2q;
-// pub mod lfu;

@@ -50,6 +50,11 @@ pub fn make_policy(
                 .map_err(to_err)?;
             Ok(Box::new(crate::policies::arc::ArcPolicy::new(tier_state)))
         }
+        "lfu" => {
+            crate::policies::lfu::LfuPolicy::validate_config(hot_storage, cold_storage)
+                .map_err(to_err)?;
+            Ok(Box::new(crate::policies::lfu::LfuPolicy::new(tier_state)))
+        }
         "dummy" => {
             crate::policies::dummy::DummyPolicy::validate_config(hot_storage, cold_storage)
                 .map_err(to_err)?;
