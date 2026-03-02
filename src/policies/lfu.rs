@@ -450,3 +450,70 @@ impl PolicyEngine for LfuPolicy {
     }
 }
 
+#[cfg(test)]
+#[cfg(unix)]
+mod tests {
+    use std::fs;
+    use std::time::SystemTime;
+
+    use super::*;
+    use crate::policy_engine::FsEventKind;
+
+    fn setup_dirs() -> (tempfile::TempDir, tempfile::TempDir) {
+        (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap())
+    }
+
+    /// Over capacity: reorganize evicts something to cold.
+    #[test]
+    fn over_capacity_evicts_to_cold() {
+        let (hot_dir, cold_dir) = setup_dirs();
+        let hot_root = fs::canonicalize(hot_dir.path()).unwrap();
+        let cold_root = fs::canonicalize(cold_dir.path()).unwrap();
+        fs::write(hot_root.join("f1"), b"tenbytes!!").unwrap();
+        fs::write(hot_root.join("f2"), b"tenbytes!!").unwrap();
+        let mut tier_state = TierState::new(
+            hot_root.clone(),
+            vec![cold_root.clone()],
+            15,
+            vec![u64::MAX],
+        );
+        tier_state.init_bytes().unwrap();
+        let mut policy = LfuPolicy::new(tier_state);
+        policy.reorganize().unwrap();
+        assert!(policy.tier_state.hot_bytes() <= 15);
+        let symlink_count = [hot_root.join("f1"), hot_root.join("f2")]
+            .iter()
+            .filter(|p| {
+                fs::symlink_metadata(p)
+                    .map(|m| m.file_type().is_symlink())
+                    .unwrap_or(false)
+            })
+            .count();
+        assert_eq!(symlink_count, 1);
+        assert!(cold_root.join("f1").exists() || cold_root.join("f2").exists());
+    }
+
+    /// Stats track demotions on over-capacity eviction.
+    #[test]
+    fn stats_track_demotions() {
+        let (hot_dir, cold_dir) = setup_dirs();
+        let hot_root = fs::canonicalize(hot_dir.path()).unwrap();
+        let cold_root = fs::canonicalize(cold_dir.path()).unwrap();
+        fs::write(hot_root.join("f1"), b"tenbytes!!").unwrap();
+        fs::write(hot_root.join("f2"), b"tenbytes!!").unwrap();
+        let mut tier_state = TierState::new(
+            hot_root.clone(),
+            vec![cold_root.clone()],
+            15,
+            vec![u64::MAX],
+        );
+        tier_state.init_bytes().unwrap();
+        let mut policy = LfuPolicy::new(tier_state);
+        policy.reorganize().unwrap();
+
+        let stats = policy.stats();
+        assert_eq!(stats.demotions, 1);
+        assert_eq!(stats.demotions_to_tier, vec![1]);
+    }
+}
+
