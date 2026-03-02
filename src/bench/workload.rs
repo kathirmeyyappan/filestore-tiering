@@ -26,6 +26,13 @@ pub struct WorkloadConfig {
     pub edit_pct: u8,
     #[allow(dead_code)] // kept for CSV/display compatibility
     pub batch_size: usize,
+    /// Edit target skew: 1.0 = uniform, higher = more concentrated on a hot subset.
+    /// Index chosen as floor(len * u^skew) where u ~ Uniform[0,1).
+    pub skew: f64,
+    /// Artificial per-op I/O delay in microseconds (simulates hot-tier latency). 0 = no delay.
+    pub hot_delay_us: u64,
+    /// Artificial per-move I/O delay in microseconds (simulates cold-tier latency for promote/demote). 0 = no delay.
+    pub cold_delay_us: u64,
 }
 
 /// Result of a workload run: throughput and move counts during the measurement window.
@@ -43,13 +50,13 @@ pub struct BenchResult {
 }
 
 /// CSV header line for benchmark output (use with --header).
-pub const CSV_HEADER: &str = "policy,warmup_sec,measure_sec,poll_interval_sec,depth,hot_cap,file_size,create_pct,delete_pct,edit_pct,batch_size,measure_ops,throughput,promotions,demotions,demotions_tier0,promotions_pct,demotions_pct";
+pub const CSV_HEADER: &str = "policy,warmup_sec,measure_sec,poll_interval_sec,depth,hot_cap,file_size,create_pct,delete_pct,edit_pct,batch_size,skew,hot_delay_us,cold_delay_us,measure_ops,throughput,promotions,demotions,demotions_tier0,promotions_pct,demotions_pct";
 
 impl BenchResult {
     /// Single CSV row for this result.
     pub fn to_csv_row(&self) -> String {
         format!(
-            "{},{},{},{},{},{},{},{},{},{},{},{},{:.1},{},{},{},{:.4},{:.4}",
+            "{},{},{},{},{},{},{},{},{},{},{},{:.1},{},{},{},{:.1},{},{},{},{:.4},{:.4}",
             self.config.policy,
             self.config.warmup_sec,
             self.config.measure_sec,
@@ -61,6 +68,9 @@ impl BenchResult {
             self.config.delete_pct,
             self.config.edit_pct,
             self.config.batch_size,
+            self.config.skew,
+            self.config.hot_delay_us,
+            self.config.cold_delay_us,
             self.measure_ops,
             self.throughput,
             self.promotions,
@@ -83,6 +93,9 @@ impl BenchResult {
   hot_capacity      {}
   file_size         {} B  (created and edited file size)
   create/delete/edit  {}% / {}% / {}%
+  skew              {:.1}  (1.0 = uniform, higher = hot subset)
+  hot_delay         {} µs  (per-op hot-tier I/O delay)
+  cold_delay        {} µs  (per-move cold-tier I/O delay)
   ─────────────────────────────────
   measure_ops       {}
   throughput        {:.1} ops/s
@@ -99,6 +112,9 @@ impl BenchResult {
             self.config.create_pct,
             self.config.delete_pct,
             self.config.edit_pct,
+            self.config.skew,
+            self.config.hot_delay_us,
+            self.config.cold_delay_us,
             self.measure_ops,
             self.throughput,
             self.promotions,
@@ -233,6 +249,8 @@ fn run_phase<R: Rng>(
 ) -> Result<u64, anyhow::Error> {
     let start = Instant::now();
     let poll_interval = Duration::from_secs_f64(config.poll_interval_sec);
+    let hot_delay = Duration::from_micros(config.hot_delay_us);
+    let cold_delay = Duration::from_micros(config.cold_delay_us);
     let mut last_poll = Instant::now();
     let mut events: Vec<AccessEvent> = Vec::new();
     let mut ops_done: u64 = 0;
@@ -269,7 +287,7 @@ fn run_phase<R: Rng>(
                 });
             }
             Op::Edit => {
-                let i = phase.rng.gen_range(0..phase.live.len());
+                let i = skewed_index(phase.live.len(), config.skew, phase.rng);
                 let path = &phase.live[i];
                 if path.exists() {
                     let mut data = fs::read(path)?;
@@ -284,20 +302,43 @@ fn run_phase<R: Rng>(
             }
         }
 
+        if !hot_delay.is_zero() {
+            std::thread::sleep(hot_delay);
+        }
+
         ops_done += 1;
 
         // Daemon peek: ingest + reorganize every poll_interval (events accumulate between polls)
         if last_poll.elapsed() >= poll_interval {
+            let before = policy.stats();
             policy.ingest(&events);
             policy.reorganize().map_err(|e| anyhow::anyhow!("{}", e))?;
             events.clear();
             last_poll = Instant::now();
+            // Simulate cold-tier I/O cost per tier move (promote or demote)
+            if !cold_delay.is_zero() {
+                let after = policy.stats();
+                let moves = (after.promotions + after.demotions)
+                    .saturating_sub(before.promotions + before.demotions);
+                if moves > 0 {
+                    std::thread::sleep(cold_delay * moves as u32);
+                }
+            }
         }
     }
 
     if !events.is_empty() {
+        let before = policy.stats();
         policy.ingest(&events);
         policy.reorganize().map_err(|e| anyhow::anyhow!("{}", e))?;
+        if !cold_delay.is_zero() {
+            let after = policy.stats();
+            let moves = (after.promotions + after.demotions)
+                .saturating_sub(before.promotions + before.demotions);
+            if moves > 0 {
+                std::thread::sleep(cold_delay * moves as u32);
+            }
+        }
     }
 
     Ok(ops_done)
@@ -338,6 +379,14 @@ fn make_nested_path(root: &Path, depth: usize, file_id: usize) -> std::path::Pat
     fs::create_dir_all(&p).ok();
     p.push(format!("f_{}.dat", file_id));
     p
+}
+
+/// Pick an index in [0, len) with power-law skew.
+/// skew=1.0 → uniform; skew=2.0 → quadratic concentration toward index 0; etc.
+fn skewed_index<R: Rng>(len: usize, skew: f64, rng: &mut R) -> usize {
+    let u: f64 = rng.r#gen();
+    let i = (len as f64 * u.powf(skew)) as usize;
+    i.min(len - 1)
 }
 
 fn create_file(path: &Path, size: usize) -> Result<()> {

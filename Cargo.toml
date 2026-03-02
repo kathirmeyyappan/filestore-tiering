@@ -19,3 +19,7 @@ path = "src/bin/tiering_bench.rs"
 
 [dev-dependencies]
 tempfile = "3"
+
+[[bench]]
+name = "presets"
+harness = false
