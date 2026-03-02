@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use filestore_tiering::bench::{BenchResult, WorkloadConfig, run};
 
-const POLICIES: &[&str] = &["basic_lru", "arc"];
+const POLICIES: &[&str] = &["basic_lru", "arc", "lfu"];
 
 fn base_config() -> WorkloadConfig {
     WorkloadConfig {
