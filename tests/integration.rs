@@ -17,7 +17,13 @@ fn bin_path() -> std::path::PathBuf {
         .unwrap_or_else(|_| std::path::PathBuf::from("target/debug/filestore-tiering"))
 }
 
-fn start_daemon(hot: &str, cold: &str, hot_cap: u64, interval_secs: u64) -> std::io::Result<Child> {
+fn start_daemon(
+    hot: &str,
+    cold: &str,
+    hot_cap: u64,
+    interval_secs: u64,
+    policy: &str,
+) -> std::io::Result<Child> {
     Command::new(bin_path())
         .args([
             "--hot-storage",
@@ -27,7 +33,7 @@ fn start_daemon(hot: &str, cold: &str, hot_cap: u64, interval_secs: u64) -> std:
             "--hot-capacity",
             &hot_cap.to_string(),
             "--policy",
-            "basic_lru",
+            policy,
             "-i",
             &interval_secs.to_string(),
         ])
@@ -51,9 +57,48 @@ fn basic_lru_evicts_when_over_capacity() {
     fs::write(hot.join("sub/file"), content).unwrap();
 
     let mut child =
-        start_daemon(hot.to_str().unwrap(), cold.to_str().unwrap(), 15, 1).expect("start daemon");
+        start_daemon(hot.to_str().unwrap(), cold.to_str().unwrap(), 15, 1, "basic_lru")
+            .expect("start daemon");
 
     // Allow initial fill + over-cap eviction (2 polls)
+    thread::sleep(Duration::from_secs(3));
+
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let hot_file = hot.join("sub/file");
+    let cold_file = cold.join("sub/file");
+
+    assert!(
+        fs::symlink_metadata(&hot_file)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false),
+        "hot path should be a symlink after eviction"
+    );
+    assert!(cold_file.exists(), "content should exist in cold");
+    assert_eq!(
+        fs::read(&cold_file).unwrap(),
+        content,
+        "cold file content should match"
+    );
+}
+
+/// arc: over capacity causes eviction; hot path becomes symlink, content in cold.
+#[test]
+fn arc_evicts_when_over_capacity() {
+    let hot_dir = tempfile::tempdir().unwrap();
+    let cold_dir = tempfile::tempdir().unwrap();
+    let hot = hot_dir.path();
+    let cold = cold_dir.path();
+
+    fs::create_dir_all(hot.join("sub")).unwrap();
+    let content = b"xxxxxxxxxxxxxxxxxxxx"; // 20 bytes
+    fs::write(hot.join("sub/file"), content).unwrap();
+
+    let mut child =
+        start_daemon(hot.to_str().unwrap(), cold.to_str().unwrap(), 15, 1, "arc")
+            .expect("start daemon");
+
     thread::sleep(Duration::from_secs(3));
 
     let _ = child.kill();
