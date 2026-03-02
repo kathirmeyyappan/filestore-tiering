@@ -118,10 +118,10 @@ impl LfuPolicy {
             let Some(Reverse((freq, _seq, path))) = self.heap.pop() else {
                 return Ok(false);
             };
-            if let Some(ex) = exclude {
-                if canonical(&path) == canonical(ex) {
-                    continue;
-                }
+            if let Some(ex) = exclude
+                && canonical(&path) == canonical(ex)
+            {
+                continue;
             }
             // Skip if path is no longer in hot_sizes or freq is stale.
             match self.hot_sizes.get(&path) {
@@ -307,11 +307,7 @@ impl PolicyEngine for LfuPolicy {
                     self.bump_freq(&p);
                 }
             }
-            policy_log::log_initial_fill(
-                "lfu",
-                self.hot_sizes.len(),
-                self.tier_state.hot_bytes(),
-            );
+            policy_log::log_initial_fill("lfu", self.hot_sizes.len(), self.tier_state.hot_bytes());
         }
 
         // Process touches oldest-first so behavior is deterministic w.r.t event order.
@@ -453,11 +449,8 @@ impl PolicyEngine for LfuPolicy {
 #[cfg(test)]
 #[cfg(unix)]
 mod tests {
-    use std::fs;
-    use std::time::SystemTime;
-
     use super::*;
-    use crate::policy_engine::FsEventKind;
+    use std::fs;
 
     fn setup_dirs() -> (tempfile::TempDir, tempfile::TempDir) {
         (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap())
@@ -516,4 +509,3 @@ mod tests {
         assert_eq!(stats.demotions_to_tier, vec![1]);
     }
 }
-
