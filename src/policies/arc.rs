@@ -274,6 +274,109 @@ impl ArcPolicy {
     pub(crate) fn p_value(&self) -> usize {
         self.p
     }
+    #[cfg(test)]
+    pub(crate) fn b1_len(&self) -> usize {
+        self.b1.len()
+    }
+    #[cfg(test)]
+    pub(crate) fn b2_len(&self) -> usize {
+        self.b2.len()
+    }
+
+    /// Validate all ARC invariants. Panics with a descriptive message on any violation.
+    #[cfg(test)]
+    pub(crate) fn assert_invariants(&self) {
+        use std::collections::HashSet;
+
+        let t1_set: HashSet<_> = self.t1.iter().collect();
+        let t2_set: HashSet<_> = self.t2.iter().collect();
+        let b1_set: HashSet<_> = self.b1.iter().collect();
+        let b2_set: HashSet<_> = self.b2.iter().collect();
+
+        // No duplicates within a single list
+        assert_eq!(t1_set.len(), self.t1.len(), "T1 has duplicate entries");
+        assert_eq!(t2_set.len(), self.t2.len(), "T2 has duplicate entries");
+        assert_eq!(b1_set.len(), self.b1.len(), "B1 has duplicate entries");
+        assert_eq!(b2_set.len(), self.b2.len(), "B2 has duplicate entries");
+
+        // Pairwise disjoint
+        assert!(
+            t1_set.is_disjoint(&t2_set),
+            "T1 and T2 share entries: {:?}",
+            t1_set.intersection(&t2_set).collect::<Vec<_>>()
+        );
+        assert!(
+            t1_set.is_disjoint(&b1_set),
+            "T1 and B1 share entries: {:?}",
+            t1_set.intersection(&b1_set).collect::<Vec<_>>()
+        );
+        assert!(
+            t1_set.is_disjoint(&b2_set),
+            "T1 and B2 share entries: {:?}",
+            t1_set.intersection(&b2_set).collect::<Vec<_>>()
+        );
+        assert!(
+            t2_set.is_disjoint(&b1_set),
+            "T2 and B1 share entries: {:?}",
+            t2_set.intersection(&b1_set).collect::<Vec<_>>()
+        );
+        assert!(
+            t2_set.is_disjoint(&b2_set),
+            "T2 and B2 share entries: {:?}",
+            t2_set.intersection(&b2_set).collect::<Vec<_>>()
+        );
+        assert!(
+            b1_set.is_disjoint(&b2_set),
+            "B1 and B2 share entries: {:?}",
+            b1_set.intersection(&b2_set).collect::<Vec<_>>()
+        );
+
+        // hot_sizes keys = T1 ∪ T2 (both directions)
+        let hot_list_set: HashSet<_> = t1_set.iter().chain(t2_set.iter()).cloned().collect();
+        let hot_sizes_set: HashSet<_> = self.hot_sizes.keys().collect();
+        for p in &hot_list_set {
+            assert!(
+                hot_sizes_set.contains(p),
+                "path in T1/T2 but not in hot_sizes: {:?}",
+                p
+            );
+        }
+        for p in &hot_sizes_set {
+            assert!(
+                hot_list_set.contains(p),
+                "path in hot_sizes but not in T1/T2: {:?}",
+                p
+            );
+        }
+
+        // No path in both hot_sizes and cold_sizes
+        for p in self.hot_sizes.keys() {
+            assert!(
+                !self.cold_sizes.contains_key(p),
+                "path in both hot_sizes and cold_sizes: {:?}",
+                p
+            );
+        }
+
+        // p bounded
+        let c = self.t1.len() + self.t2.len();
+        assert!(self.p <= c, "p ({}) exceeds |T1|+|T2| ({})", self.p, c);
+
+        // Ghost lists bounded
+        let ghost_cap = std::cmp::max(c, 16);
+        assert!(
+            self.b1.len() <= ghost_cap,
+            "|B1| ({}) exceeds ghost cap ({})",
+            self.b1.len(),
+            ghost_cap
+        );
+        assert!(
+            self.b2.len() <= ghost_cap,
+            "|B2| ({}) exceeds ghost cap ({})",
+            self.b2.len(),
+            ghost_cap
+        );
+    }
 }
 
 /// Which ARC list an operation targets.
@@ -569,14 +672,14 @@ impl PolicyEngine for ArcPolicy {
             }
 
             // ── Case 6: Regular file not in T1 or T2 (new file) → add to T1 ──
-            if !self.hot_sizes.contains_key(&path)
-                && let Ok(sz) = fs::metadata(&path).map(|m| m.len())
-            {
-                self.tier_state.adjust_hot_bytes(0, sz);
-                self.hot_sizes.insert(path.clone(), sz);
-                new_in_hot += 1;
+            if !self.hot_sizes.contains_key(&path) {
+                if let Ok(sz) = fs::metadata(&path).map(|m| m.len()) {
+                    self.tier_state.adjust_hot_bytes(0, sz);
+                    self.hot_sizes.insert(path.clone(), sz);
+                    new_in_hot += 1;
+                }
+                self.t1.push_front(path);
             }
-            self.t1.push_front(path);
         }
 
         // ── Evict over capacity ──
@@ -648,6 +751,7 @@ mod tests {
         tier_state.init_bytes().unwrap();
         let mut policy = ArcPolicy::new(tier_state);
         policy.reorganize().unwrap();
+        policy.assert_invariants();
         assert!(policy.tier_state.hot_bytes() <= 15);
         let symlink_count = [hot_root.join("f1"), hot_root.join("f2")]
             .iter()
@@ -683,6 +787,7 @@ mod tests {
         // File starts in T1
         assert_eq!(policy.t1_len(), 1);
         assert_eq!(policy.t2_len(), 0);
+        policy.assert_invariants();
 
         // Touch it → should move to T2
         policy.ingest(&[AccessEvent {
@@ -694,6 +799,7 @@ mod tests {
 
         assert_eq!(policy.t1_len(), 0);
         assert_eq!(policy.t2_len(), 1);
+        policy.assert_invariants();
     }
 
     /// Ghost hit on B1 (evicted from T1) increases p.
@@ -746,6 +852,7 @@ mod tests {
             p_before,
             policy.p_value()
         );
+        policy.assert_invariants();
     }
 
     /// Ghost hit on B2 (evicted from T2) decreases p.
@@ -837,6 +944,7 @@ mod tests {
             p_before,
             policy.p_value()
         );
+        policy.assert_invariants();
     }
 
     /// Events from our own eviction must not cause re-promotion (infinite loop prevention).
@@ -905,6 +1013,7 @@ mod tests {
             cold_after_first,
             "cold bytes should not change"
         );
+        policy.assert_invariants();
     }
 
     /// Remove event cleans up state correctly.
@@ -930,6 +1039,7 @@ mod tests {
         }]);
         policy.reorganize().unwrap();
         assert!(policy.tier_state.cold_bytes(0) < cold_before);
+        policy.assert_invariants();
     }
 
     /// Cold-path event (edit via symlink) promotes file back to hot.
@@ -974,6 +1084,7 @@ mod tests {
                 .is_symlink()
         );
         assert!(!cold_path.exists());
+        policy.assert_invariants();
     }
 
     /// Stats track promotions and demotions correctly.
@@ -997,5 +1108,119 @@ mod tests {
         let stats = policy.stats();
         assert_eq!(stats.demotions, 1, "one file should be evicted");
         assert_eq!(stats.demotions_to_tier, vec![1]);
+        policy.assert_invariants();
+    }
+
+    /// Same file touched multiple times in one batch: no duplicates in lists.
+    #[test]
+    fn multi_touch_same_file_no_duplicates() {
+        let (hot_dir, cold_dir) = setup_dirs();
+        let hot_root = fs::canonicalize(hot_dir.path()).unwrap();
+        let cold_root = fs::canonicalize(cold_dir.path()).unwrap();
+        fs::write(hot_root.join("a"), b"aaaaaaaaaa").unwrap();
+        let mut tier_state = TierState::new(
+            hot_root.clone(),
+            vec![cold_root.clone()],
+            100,
+            vec![u64::MAX],
+        );
+        tier_state.init_bytes().unwrap();
+        let mut policy = ArcPolicy::new(tier_state);
+        policy.reorganize().unwrap();
+        policy.assert_invariants();
+
+        // Touch the same file 5 times in one batch
+        let ts = SystemTime::now();
+        let events: Vec<_> = (0..5)
+            .map(|_| AccessEvent {
+                path: hot_root.join("a"),
+                kind: FsEventKind::Modify,
+                timestamp: ts,
+            })
+            .collect();
+        policy.ingest(&events);
+        policy.reorganize().unwrap();
+        policy.assert_invariants();
+
+        // Should be in T2 (promoted from T1 on second touch), no duplicates
+        assert_eq!(policy.t1_len(), 0);
+        assert_eq!(policy.t2_len(), 1);
+    }
+
+    /// Ghost list trimming keeps B1/B2 bounded.
+    #[test]
+    fn ghost_lists_stay_bounded() {
+        let (hot_dir, cold_dir) = setup_dirs();
+        let hot_root = fs::canonicalize(hot_dir.path()).unwrap();
+        let cold_root = fs::canonicalize(cold_dir.path()).unwrap();
+        // Capacity for 1 file (10 bytes). Create many files to force lots of evictions.
+        let mut tier_state = TierState::new(
+            hot_root.clone(),
+            vec![cold_root.clone()],
+            15,
+            vec![u64::MAX],
+        );
+        tier_state.init_bytes().unwrap();
+        let mut policy = ArcPolicy::new(tier_state);
+
+        // Create and ingest 50 files one at a time, each causing eviction
+        for i in 0..50 {
+            let name = format!("f_{}", i);
+            fs::write(hot_root.join(&name), b"aaaaaaaaaa").unwrap();
+            policy.ingest(&[AccessEvent {
+                path: hot_root.join(&name),
+                kind: FsEventKind::Create,
+                timestamp: SystemTime::now(),
+            }]);
+            policy.reorganize().unwrap();
+            policy.assert_invariants();
+        }
+
+        // Ghost lists should be bounded by max(|T1|+|T2|, 16) = 16 (only 1 file in hot)
+        assert!(
+            policy.b1_len() <= 16,
+            "B1 should be bounded: {}",
+            policy.b1_len()
+        );
+        assert!(
+            policy.b2_len() <= 16,
+            "B2 should be bounded: {}",
+            policy.b2_len()
+        );
+    }
+
+    /// New file touched while already tracked (e.g. create event followed by modify in same batch)
+    /// should not create duplicate T1 entries.
+    #[test]
+    fn create_then_modify_same_batch_no_duplicate() {
+        let (hot_dir, cold_dir) = setup_dirs();
+        let hot_root = fs::canonicalize(hot_dir.path()).unwrap();
+        let cold_root = fs::canonicalize(cold_dir.path()).unwrap();
+        fs::write(hot_root.join("a"), b"aaaaaaaaaa").unwrap();
+        let mut tier_state = TierState::new(
+            hot_root.clone(),
+            vec![cold_root.clone()],
+            100,
+            vec![u64::MAX],
+        );
+        tier_state.init_bytes().unwrap();
+        let mut policy = ArcPolicy::new(tier_state);
+
+        // Simulate watcher: Create + Modify for the same file
+        let ts = SystemTime::now();
+        policy.ingest(&[
+            AccessEvent {
+                path: hot_root.join("a"),
+                kind: FsEventKind::Create,
+                timestamp: ts,
+            },
+            AccessEvent {
+                path: hot_root.join("a"),
+                kind: FsEventKind::Modify,
+                timestamp: ts,
+            },
+        ]);
+        policy.reorganize().unwrap();
+        policy.assert_invariants();
     }
 }
