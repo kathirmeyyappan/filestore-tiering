@@ -14,8 +14,17 @@ pub enum FsEventKind {
     Other,
 }
 
-/// Counts of promotions and demotions for benchmarking and evaluation.
-/// Policies that perform moves should track these and return them from `stats()`.
+/// Move counts and per-tier write bytes for benchmarking and evaluation.
+/// Policies return this from `stats()`; the benchmark snapshots it before and after
+/// the measurement window so only the delta is reported.
+///
+/// ## Tier indexing
+///
+/// `bytes_written_to_tier[0]` = bytes the daemon wrote to the **hot tier** (promotions).
+/// `bytes_written_to_tier[i+1]` = bytes the daemon wrote to **cold tier i** (demotions).
+///
+/// This matches the "bytes written to storage layer X" metric used in cloud tiering:
+/// cold writes are expensive (slow, often charged per GB), hot writes are fast/cheap.
 #[derive(Debug, Clone, Default)]
 pub struct PolicyStats {
     /// Total number of promotions (cold → hot).
@@ -24,6 +33,9 @@ pub struct PolicyStats {
     pub demotions: u64,
     /// Demotions per cold tier (index 0 = warmest). Length = number of cold tiers.
     pub demotions_to_tier: Vec<u64>,
+    /// Bytes the daemon wrote to each tier.
+    /// Index 0 = hot tier; index i+1 = cold tier i.
+    pub bytes_written_to_tier: Vec<u64>,
 }
 
 impl PolicyStats {
@@ -32,6 +44,7 @@ impl PolicyStats {
             promotions: 0,
             demotions: 0,
             demotions_to_tier: vec![0; num_cold_tiers],
+            bytes_written_to_tier: vec![0; 1 + num_cold_tiers],
         }
     }
 }

@@ -4,4 +4,7 @@
 
 mod workload;
 
-pub use workload::{BenchResult, CSV_HEADER, WorkloadConfig, run};
+pub use workload::{
+    BenchResult, CSV_HEADER, WorkloadConfig, WorkloadOp, WorkloadTrace, generate_trace,
+    run, run_with_trace,
+};

@@ -22,6 +22,9 @@ pub struct TierState {
     hot_capacity: u64,
     #[allow(dead_code)] // Reserved for policies that enforce cold capacity
     cold_capacities: Vec<u64>,
+    /// Cumulative bytes the daemon wrote to each storage layer since construction.
+    /// Index 0 = hot tier; index i+1 = cold tier i.
+    bytes_written_to_tier: Vec<u64>,
 }
 
 impl TierState {
@@ -42,6 +45,7 @@ impl TierState {
             cold_bytes: vec![0; n],
             hot_capacity,
             cold_capacities,
+            bytes_written_to_tier: vec![0; 1 + n],
         }
     }
 
@@ -56,6 +60,12 @@ impl TierState {
 
     pub fn hot_root(&self) -> &Path {
         &self.hot_root
+    }
+
+    /// Cumulative bytes the daemon wrote to each storage layer since construction.
+    /// Index 0 = hot tier (promotions); index i+1 = cold tier i (demotions).
+    pub fn bytes_written_to_tier(&self) -> &[u64] {
+        &self.bytes_written_to_tier
     }
 
     /// Root directory for cold tier at index `i`. Index 0 is warmest, higher indices colder.
@@ -142,6 +152,21 @@ impl TierState {
         target_dir: &Path,
     ) -> Result<u64, Box<dyn Error + Send + Sync>> {
         let size = tier_fs::move_to_tier(&self.hot_root, hot_path, target_dir)?;
+        if size > 0 {
+            let tier_idx = if target_dir == self.hot_root.as_path() {
+                0 // hot tier
+            } else {
+                // Find which cold tier index this target maps to.
+                self.cold_roots
+                    .iter()
+                    .position(|r| r.as_path() == target_dir)
+                    .map(|i| i + 1)
+                    .unwrap_or(1) // safe fallback to cold tier 0
+            };
+            if let Some(slot) = self.bytes_written_to_tier.get_mut(tier_idx) {
+                *slot += size;
+            }
+        }
         Ok(size)
     }
 }

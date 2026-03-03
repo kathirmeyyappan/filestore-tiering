@@ -1,26 +1,50 @@
-//! Standardized benchmark presets: run `cargo bench` to compare policies across representative workloads.
+//! Standardized benchmark presets.
+//!
+//! Run `cargo bench` to compare all policies across representative workloads.
+//!
+//! ## Fairness guarantee
+//!
+//! Within each preset, a single `WorkloadTrace` is generated once and then
+//! replayed identically for every policy. All policies see the same sequence of
+//! creates, deletes, edits, file sizes, and access indices — the only variable
+//! is the policy's eviction decisions. This removes RNG noise from cross-policy
+//! comparisons inside one run (though two separate `cargo bench` invocations will
+//! produce different traces, so absolute numbers may vary).
+//!
+//! ## Primary metric: hit rate
+//!
+//! Hit rate = hot edits / total edits during the measurement window. An edit is
+//! "hot" if the hot-path file is a regular file (content in hot tier) and "cold"
+//! if it is a symlink (content evicted to a cold tier). Higher is better.
+//!
+//! ## Secondary metrics
+//!
+//! `→hot_KB` and `→cld_KB` are bytes written to each storage layer by the daemon
+//! (promotions and demotions respectively). Together with promo/demo counts they
+//! show the I/O cost of achieving the observed hit rate.
 
 use std::time::Instant;
 
-use filestore_tiering::bench::{BenchResult, WorkloadConfig, run};
+use filestore_tiering::bench::{BenchResult, WorkloadConfig, generate_trace, run_with_trace};
 
 const POLICIES: &[&str] = &["basic_lru", "arc", "lfu", "lru_2q"];
 
 fn base_config() -> WorkloadConfig {
     WorkloadConfig {
         policy: String::new(),
-        warmup_sec: 3.0,
-        measure_sec: 10.0,
-        poll_interval_sec: 0.2,
+        warmup_ops: 1_000,
+        measure_ops: 5_000,
+        poll_interval_ops: 50,
         depth: 3,
+        // ~17 files fit in hot at average file size (1152 B avg of [256, 2048]).
+        // Live list grows to ~300+ files over the full run, creating real eviction pressure.
         hot_capacity: 20_000,
-        file_size: 500,
+        min_file_size: 256,
+        max_file_size: 2_048,
         create_pct: 10,
         delete_pct: 5,
         edit_pct: 85,
-        batch_size: 1,
         skew: 1.0,
-        cold_access_delay_us: 0,
     }
 }
 
@@ -33,114 +57,106 @@ struct Preset {
 fn presets() -> Vec<Preset> {
     vec![
         Preset {
+            // Baseline: uniform access with no exploitable pattern. With skew=1.0 all
+            // files are equally likely edit targets, so no policy has an informational
+            // advantage. All policies should converge to roughly the same hit rate
+            // (≈ hot_capacity / (avg_file_size × live_count)). Any spread here is
+            // implementation overhead, not algorithmic.
             name: "steady_state",
-            description: "Baseline uniform access: 10/5/85 create/delete/edit, skew=1.0",
+            description: "Uniform access, 10/5/85, skew=1.0. Policies should converge.",
             apply: |_cfg| {},
         },
         Preset {
-            name: "hot_set",
-            description: "Concentrated edits on hot subset: skew=3.0",
+            // Frequency-favored: near-zero file creation, edits concentrated on a tiny
+            // stable subset of old files (skew=5.0). Hot tier holds only ~8 files (4K / 512 B avg).
+            // LFU keeps the same 8 files in hot permanently — their access counts far
+            // outweigh any new arrival. LRU can displace one when a rare create pushes
+            // something to MRU, then must re-promote it on the next access. LRU-2Q's Am
+            // queue also protects multi-access files. ARC's ghost lists help it partially
+            // recover. Result: clear ordering lfu ≥ lru_2q > arc > basic_lru.
+            name: "frequency_favored",
+            description: "Stable hot set: 3/0/97, skew=5.0, hot=4K. LFU wins.",
             apply: |cfg| {
-                cfg.skew = 3.0;
-            },
-        },
-        Preset {
-            name: "tiny_hot_hot_set",
-            description: "Tiny hot tier (5K), strong skew, cold_access_penalty=10ms. Frequency-aware policies keep hot set in hot.",
-            apply: |cfg| {
-                cfg.hot_capacity = 5_000;
-                cfg.skew = 5.0;
-                cfg.create_pct = 5;
+                cfg.hot_capacity = 4_000;
+                cfg.min_file_size = 256;
+                cfg.max_file_size = 768; // tight tier: avg ~512 B → ~8 files fit
+                cfg.create_pct = 3;
                 cfg.delete_pct = 0;
-                cfg.edit_pct = 95;
-                cfg.cold_access_delay_us = 10_000;
+                cfg.edit_pct = 97;
+                cfg.skew = 5.0;
+                cfg.warmup_ops = 2_000;
+                cfg.measure_ops = 10_000;
             },
         },
         Preset {
-            name: "high_churn",
-            description: "Heavy file creation/deletion: 40/10/50, skew=1.0",
+            // Recency-favored: high create rate floods the live list with new files.
+            // skew=0.3 → u^0.3 concentrates edits on HIGH indices (newest files) because
+            // u^0.3 > u for u in (0,1). The working set is always the most recently
+            // created files — exactly what LRU and ARC are optimised for. LFU retains
+            // old high-count files and evicts new arrivals (freq=1) immediately, so the
+            // very next edit on a just-created file is a cold miss. LRU-2Q's A1in queue
+            // holds new files briefly, so it beats LFU but trails LRU/ARC.
+            // Expected: arc ≈ basic_lru > lru_2q >> lfu.
+            name: "recency_favored",
+            description: "New-file storm: 40/0/60, skew=0.3 (newest), hot=4K. LFU loses.",
             apply: |cfg| {
+                cfg.hot_capacity = 4_000;
+                cfg.min_file_size = 256;
+                cfg.max_file_size = 768;
                 cfg.create_pct = 40;
-                cfg.delete_pct = 10;
+                cfg.delete_pct = 0;
+                cfg.edit_pct = 60;
+                cfg.skew = 0.3;
+                cfg.warmup_ops = 2_000;
+                cfg.measure_ops = 10_000;
+            },
+        },
+        Preset {
+            // High-churn: heavy create AND delete traffic rapidly cycles the working set.
+            // No exploitable access skew. Tests how quickly each policy adapts when the
+            // active file population changes. With balanced creates/deletes the live list
+            // stabilises, but its composition changes constantly, stressing eviction logic.
+            name: "high_churn",
+            description: "Heavy turnover: 30/20/50, skew=1.0. Working set shifts constantly.",
+            apply: |cfg| {
+                cfg.create_pct = 30;
+                cfg.delete_pct = 20;
                 cfg.edit_pct = 50;
             },
         },
         Preset {
-            name: "slow_cold",
-            description: "Slow cold storage: skew=3.0, cold_delay=5000us",
+            // Moderate skew: a real-world mixed workload where most edits land on a
+            // concentrated but not tiny subset of older files. Hot tier is larger (20K)
+            // so more files fit, making the policy decision more nuanced. Tests whether
+            // frequency-aware policies (LFU, LRU-2Q) maintain their advantage under a
+            // milder signal compared to frequency_favored.
+            name: "hot_set",
+            description: "Skewed edits on older files (skew=3.0), hot=20K.",
             apply: |cfg| {
                 cfg.skew = 3.0;
-                cfg.cold_access_delay_us = 5_000;
-            },
-        },
-        // ── Presets designed to expose policy differences via cold_access_delay_us ──
-        //
-        // Without cold_access_delay_us, all policies look similar because hot and cold
-        // live on the same device (same I/O speed). cold_access_delay_us makes accessing
-        // a cold file (hot path is a symlink) artificially expensive, directly penalizing
-        // any policy that keeps the wrong files in hot.
-        Preset {
-            // LFU wins; basic_lru and ARC lose.
-            // Almost no new files; edits are strongly concentrated on a small stable set
-            // of old files (skew=5.0). LFU keeps those files in hot permanently via
-            // frequency counts. LRU can displace them temporarily when any create pushes
-            // a new file to MRU, causing an expensive cold-access penalty when the old
-            // hot file is next edited. ARC also suffers from similar displacement.
-            // Empirically verified: LFU ~25-30% faster than LRU/ARC on this preset.
-            name: "lfu_favored",
-            description: "Stable hot set (3% create, 97% edit, skew=5.0), tiny hot tier, cold_access_delay=15ms. LFU ~25% faster.",
-            apply: |cfg| {
-                cfg.hot_capacity = 4_000;          // ~8 files
-                cfg.create_pct = 3;
-                cfg.delete_pct = 0;
-                cfg.edit_pct = 97;
-                cfg.skew = 5.0;                    // top ~4% of files get ~40% of edits
-                cfg.cold_access_delay_us = 15_000;
-                cfg.warmup_sec = 5.0;
-                cfg.measure_sec = 15.0;
-            },
-        },
-        Preset {
-            // LRU and ARC win; LFU loses badly (~3x slower).
-            // High create rate floods `live` with new files. skew=0.3 concentrates edits
-            // on HIGH indices (newest files). LFU keeps old high-frequency files hot and
-            // evicts new files immediately (they have freq=1-2 vs old files' high counts).
-            // Every edit on a just-evicted new file incurs the 20ms cold_access_delay.
-            // LRU and ARC both keep recent files in hot (MRU / T1 respectively), so they
-            // mostly serve new-file edits from hot.
-            // Empirically verified: LRU/ARC ~3x faster than LFU on this preset.
-            name: "recency_favored",
-            description: "High create rate (40%), edits skewed to NEW files (skew=0.3), tiny hot tier, cold_access_delay=20ms. LFU ~3x slower.",
-            apply: |cfg| {
-                cfg.hot_capacity = 4_000;          // ~8 files
-                cfg.create_pct = 40;
-                cfg.delete_pct = 0;
-                cfg.edit_pct = 60;
-                cfg.skew = 0.3;                    // u^0.3 > u → concentrated on high indices (new files)
-                cfg.cold_access_delay_us = 20_000;
-                cfg.warmup_sec = 5.0;
-                cfg.measure_sec = 15.0;
             },
         },
     ]
 }
 
 fn run_preset(preset: &Preset) -> Vec<BenchResult> {
+    let mut cfg = base_config();
+    (preset.apply)(&mut cfg);
+
+    // Generate the trace once — all policies replay the exact same operations.
+    let mut rng = rand::thread_rng();
+    let trace = generate_trace(&cfg, &mut rng);
+
     let mut results = Vec::new();
     for &policy in POLICIES {
-        let mut cfg = base_config();
-        (preset.apply)(&mut cfg);
         cfg.policy = policy.to_string();
-
         let start = Instant::now();
-        match run(cfg) {
+        match run_with_trace(&cfg, &trace) {
             Ok(result) => {
                 eprintln!("    {} ... {:.1}s", policy, start.elapsed().as_secs_f64());
                 results.push(result);
             }
-            Err(e) => {
-                eprintln!("    {} ... FAILED: {}", policy, e);
-            }
+            Err(e) => eprintln!("    {} ... FAILED: {}", policy, e),
         }
     }
     results
@@ -152,21 +168,24 @@ fn print_table(preset_name: &str, description: &str, results: &[BenchResult]) {
     println!("    {}", description);
     println!();
     println!(
-        "  {:<12} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10}",
-        "policy", "ops/s", "ops", "promos", "demos", "promo%", "demo%", "hit%"
+        "  {:<12} {:>7} {:>7} {:>7} {:>7} {:>8} {:>9} {:>8} {:>9}",
+        "policy", "hit%", "creates", "deletes", "edits", "promos", "→hot_KB", "demos", "→cld_KB"
     );
-    println!("  {}", "-".repeat(84));
+    println!("  {}", "-".repeat(83));
     for r in results {
+        let hot_kb = r.bytes_written_to_tier.first().copied().unwrap_or(0) as f64 / 1024.0;
+        let cld_kb = r.bytes_written_to_tier.get(1).copied().unwrap_or(0) as f64 / 1024.0;
         println!(
-            "  {:<12} {:>10.1} {:>10} {:>10} {:>10} {:>10.2} {:>10.2} {:>10.2}",
+            "  {:<12} {:>7.2} {:>7} {:>7} {:>7} {:>8} {:>9.1} {:>8} {:>9.1}",
             r.config.policy,
-            r.throughput,
-            r.measure_ops,
-            r.promotions,
-            r.demotions,
-            r.promotions_pct,
-            r.demotions_pct,
             r.hit_rate * 100.0,
+            r.total_creates,
+            r.total_deletes,
+            r.total_edits,
+            r.promotions,
+            hot_kb,
+            r.demotions,
+            cld_kb,
         );
     }
 }
@@ -176,21 +195,27 @@ fn main() {
     let base = base_config();
 
     println!(
-        "Benchmark presets: {} presets x {} policies",
+        "Benchmark presets: {} presets × {} policies",
         all_presets.len(),
         POLICIES.len()
     );
     println!(
-        "  warmup={:.0}s, measure={:.0}s per run",
-        base.warmup_sec, base.measure_sec
+        "  base: warmup={}  measure={}  poll={}ops  hot={}B  files={}–{}B",
+        base.warmup_ops,
+        base.measure_ops,
+        base.poll_interval_ops,
+        base.hot_capacity,
+        base.min_file_size,
+        base.max_file_size,
     );
     println!(
-        "  Total estimated time: ~{:.0}s",
-        all_presets.len() as f64 * POLICIES.len() as f64 * (base.warmup_sec + base.measure_sec)
+        "  Estimated total: ~{}s (wall clock per policy × {} policies × {} presets)",
+        all_presets.len() * POLICIES.len() * 5, // rough estimate
+        POLICIES.len(),
+        all_presets.len(),
     );
 
     let overall_start = Instant::now();
-
     for preset in &all_presets {
         eprintln!("  [preset: {}]", preset.name);
         let results = run_preset(preset);
@@ -198,8 +223,5 @@ fn main() {
     }
 
     println!();
-    println!(
-        "Total elapsed: {:.1}s",
-        overall_start.elapsed().as_secs_f64()
-    );
+    println!("Total elapsed: {:.1}s", overall_start.elapsed().as_secs_f64());
 }
