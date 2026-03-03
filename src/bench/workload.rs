@@ -1,22 +1,42 @@
-//! Workload execution: create/delete/edit mix, ingest+reorganize. Time-based with warmup + measurement.
+//! Workload execution for benchmarking.
+//!
+//! ## Architecture (matches production)
+//!
+//! Two independent threads:
+//!
+//! - **Workload thread** (main): creates / edits / deletes files in the hot directory at full
+//!   speed. It only sleeps when it hits a cold file (the `cold_access_delay_us` penalty), which
+//!   is exactly what we want to measure: placement quality.
+//!
+//! - **Daemon thread**: runs a real `FsWatcher` on the hot + cold directories — the same path
+//!   as production — and calls `policy.ingest + reorganize` every `poll_interval_sec`. Policy
+//!   compute time never shows up in the workload throughput number.
+//!
+//! The workload thread constructs no events and shares no buffer with the daemon; the OS and
+//! `notify` crate handle event delivery exactly as they do in production.
 
 use std::fs;
-use std::path::Path;
-use std::time::{Duration, Instant, SystemTime};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+use std::thread;
 
 use anyhow::Result;
 use rand::Rng;
 
+use crate::capacity::format_capacity;
 use crate::daemon::make_policy;
-use crate::policy_engine::{AccessEvent, FsEventKind, PolicyEngine};
+use crate::policy_engine::PolicyEngine;
+use crate::watcher::FsWatcher;
 
-/// Parameters for one benchmark run (matches CLI of tiering_bench).
+/// Parameters for one benchmark run.
 #[derive(Debug, Clone)]
 pub struct WorkloadConfig {
     pub policy: String,
     pub warmup_sec: f64,
     pub measure_sec: f64,
-    /// How often the "daemon" polls: ingest + reorganize every this many seconds. Events accumulate between polls.
+    /// How often the daemon thread wakes to poll the watcher and call reorganize.
     pub poll_interval_sec: f64,
     pub depth: usize,
     pub hot_capacity: u64,
@@ -24,21 +44,19 @@ pub struct WorkloadConfig {
     pub create_pct: u8,
     pub delete_pct: u8,
     pub edit_pct: u8,
-    #[allow(dead_code)] // kept for CSV/display compatibility
+    #[allow(dead_code)]
     pub batch_size: usize,
-    /// Edit target skew: 1.0 = uniform, higher = more concentrated on a hot subset.
-    /// Index chosen as floor(len * u^skew) where u ~ Uniform[0,1).
+    /// Edit-target skew: 1.0 = uniform, >1 = concentrated on oldest files (low index),
+    /// <1 = concentrated on newest files (high index). Index = floor(len * u^skew), u ~ U[0,1).
     pub skew: f64,
-    /// Artificial per-op I/O delay in microseconds (simulates hot-tier latency). 0 = no delay.
-    pub hot_delay_us: u64,
-    /// Artificial per-access I/O delay in microseconds applied when an edit targets a cold file
-    /// (hot path is a symlink). Simulates the latency of reading/writing cold storage in-request,
-    /// directly penalizing policies that keep the wrong files in hot. This is the primary knob
-    /// for exposing policy differences: a policy with poor placement pays this on every cold edit.
+    /// Per-access penalty in µs when an edit hits a cold file (hot path is a symlink).
+    /// Simulates the latency of fetching data from cold storage during a live request.
+    /// This is the primary differentiator between policies: a policy with poor placement
+    /// pays this on every cold edit; a policy with good placement rarely pays it.
     pub cold_access_delay_us: u64,
 }
 
-/// Result of a workload run: throughput and move counts during the measurement window.
+/// Result of one benchmark run.
 #[derive(Debug)]
 pub struct BenchResult {
     pub config: WorkloadConfig,
@@ -52,14 +70,14 @@ pub struct BenchResult {
     pub demotions_pct: f64,
 }
 
-/// CSV header line for benchmark output (use with --header).
-pub const CSV_HEADER: &str = "policy,warmup_sec,measure_sec,poll_interval_sec,depth,hot_cap,file_size,create_pct,delete_pct,edit_pct,batch_size,skew,hot_delay_us,cold_access_delay_us,measure_ops,throughput,promotions,demotions,demotions_tier0,promotions_pct,demotions_pct";
+pub const CSV_HEADER: &str = "policy,warmup_sec,measure_sec,poll_interval_sec,depth,hot_cap,\
+file_size,create_pct,delete_pct,edit_pct,batch_size,skew,cold_access_delay_us,\
+measure_ops,throughput,promotions,demotions,demotions_tier0,promotions_pct,demotions_pct";
 
 impl BenchResult {
-    /// Single CSV row for this result.
     pub fn to_csv_row(&self) -> String {
         format!(
-            "{},{},{},{},{},{},{},{},{},{},{},{:.1},{},{},{},{:.1},{},{},{},{:.4},{:.4}",
+            "{},{},{},{},{},{},{},{},{},{},{},{:.1},{},{},{:.1},{},{},{},{:.4},{:.4}",
             self.config.policy,
             self.config.warmup_sec,
             self.config.measure_sec,
@@ -72,7 +90,6 @@ impl BenchResult {
             self.config.edit_pct,
             self.config.batch_size,
             self.config.skew,
-            self.config.hot_delay_us,
             self.config.cold_access_delay_us,
             self.measure_ops,
             self.throughput,
@@ -84,9 +101,7 @@ impl BenchResult {
         )
     }
 
-    /// Human-readable summary (default output when not using --csv).
     pub fn to_pretty_string(&self) -> String {
-        use crate::capacity::format_capacity;
         format!(
             r#"  policy            {}
   warmup            {:.1} s
@@ -94,11 +109,10 @@ impl BenchResult {
   poll_interval     {:.2} s  (daemon peek rate)
   depth             {}
   hot_capacity      {}
-  file_size         {} B  (created and edited file size)
+  file_size         {} B
   create/delete/edit  {}% / {}% / {}%
-  skew              {:.1}  (1.0 = uniform, higher = hot subset)
-  hot_delay         {} µs  (per-op hot-tier I/O delay)
-  cold_access_delay {} µs  (per-edit cold-file access penalty)
+  skew              {:.1}  (1.0 = uniform, >1 = old files, <1 = new files)
+  cold_access_delay {} µs  (per-edit penalty for cold-file access)
   ─────────────────────────────────
   measure_ops       {}
   throughput        {:.1} ops/s
@@ -116,7 +130,6 @@ impl BenchResult {
             self.config.delete_pct,
             self.config.edit_pct,
             self.config.skew,
-            self.config.hot_delay_us,
             self.config.cold_access_delay_us,
             self.measure_ops,
             self.throughput,
@@ -129,7 +142,7 @@ impl BenchResult {
     }
 }
 
-/// Run the synthetic workload: warmup for warmup_sec, then measure for measure_sec. Reports throughput and move counts during the measurement window.
+/// Run the benchmark: warmup, then measure. Returns throughput + move counts.
 pub fn run(config: WorkloadConfig) -> Result<BenchResult> {
     let dir = tempfile::tempdir()?;
     let hot_path = dir.path().join("hot");
@@ -137,54 +150,84 @@ pub fn run(config: WorkloadConfig) -> Result<BenchResult> {
     fs::create_dir_all(&hot_path)?;
     fs::create_dir_all(&cold_path)?;
 
-    let cold_caps = vec![u64::MAX];
-    let mut policy = make_policy(
+    // Policy behind a mutex so the daemon thread can own it while we snapshot stats.
+    let policy: Arc<Mutex<Box<dyn PolicyEngine>>> = Arc::new(Mutex::new(make_policy(
         &config.policy,
         &hot_path,
         std::slice::from_ref(&cold_path),
         config.hot_capacity,
-        cold_caps,
-    )?;
+        vec![u64::MAX],
+    )?));
 
+    // Real FS watcher on both tiers — same as production.
+    let watcher = FsWatcher::new(&[&hot_path, &cold_path])?;
+    let stop = Arc::new(AtomicBool::new(false));
+
+    // ── Daemon thread ─────────────────────────────────────────────────────────
+    // Sleeps poll_interval, then polls the watcher and calls ingest+reorganize.
+    // The workload thread is never blocked by this.
+    let daemon = {
+        let policy = Arc::clone(&policy);
+        let stop = Arc::clone(&stop);
+        let poll_interval = Duration::from_secs_f64(config.poll_interval_sec);
+        thread::spawn(move || -> Result<()> {
+            loop {
+                thread::sleep(poll_interval);
+                let events = watcher.poll();
+                {
+                    let mut pol = policy.lock().unwrap();
+                    pol.ingest(&events);
+                    pol.reorganize().map_err(|e| anyhow::anyhow!("{}", e))?;
+                }
+                // Check stop AFTER polling so all remaining events are flushed before exit.
+                if stop.load(Ordering::Relaxed) {
+                    break;
+                }
+            }
+            Ok(())
+        })
+    };
+
+    // Workload state persists across warmup → measure so the file population is
+    // continuous (measure phase sees the working set built during warmup).
     let mut rng = rand::thread_rng();
-    let mut live: Vec<std::path::PathBuf> = Vec::new();
-    let mut file_counter: usize = 0;
-    let now = SystemTime::now();
+    let mut live: Vec<PathBuf> = Vec::new();
+    let mut file_counter = 0usize;
+    let cold_access_delay = Duration::from_micros(config.cold_access_delay_us);
 
-    let warmup_duration = Duration::from_secs_f64(config.warmup_sec);
-    let measure_duration = Duration::from_secs_f64(config.measure_sec);
-
-    // Warmup: run workload for warmup_sec (daemon peeks every poll_interval_sec)
-    run_phase(
+    // ── Warmup ────────────────────────────────────────────────────────────────
+    workload_loop(
         &config,
         &hot_path,
-        &mut *policy,
-        &mut PhaseState {
-            rng: &mut rng,
-            live: &mut live,
-            file_counter: &mut file_counter,
-        },
-        now,
-        warmup_duration,
+        &mut rng,
+        &mut live,
+        &mut file_counter,
+        cold_access_delay,
+        Duration::from_secs_f64(config.warmup_sec),
     )?;
+    let stats_after_warmup = policy.lock().unwrap().stats();
 
-    let stats_after_warmup = policy.stats();
-
-    // Measurement: run for measure_sec, count ops
-    let measure_ops = run_phase(
+    // ── Measure ───────────────────────────────────────────────────────────────
+    let measure_ops = workload_loop(
         &config,
         &hot_path,
-        &mut *policy,
-        &mut PhaseState {
-            rng: &mut rng,
-            live: &mut live,
-            file_counter: &mut file_counter,
-        },
-        now,
-        measure_duration,
+        &mut rng,
+        &mut live,
+        &mut file_counter,
+        cold_access_delay,
+        Duration::from_secs_f64(config.measure_sec),
     )?;
-    let stats_after_measure = policy.stats();
 
+    // Signal daemon to stop. It will do one final poll to flush any pending watcher
+    // events, then exit. We join before reading final stats.
+    stop.store(true, Ordering::Relaxed);
+    daemon
+        .join()
+        .map_err(|_| anyhow::anyhow!("daemon thread panicked"))??;
+
+    let stats_after_measure = policy.lock().unwrap().stats();
+
+    // ── Compute results ───────────────────────────────────────────────────────
     let promotions = stats_after_measure
         .promotions
         .saturating_sub(stats_after_warmup.promotions);
@@ -233,109 +276,7 @@ pub fn run(config: WorkloadConfig) -> Result<BenchResult> {
     })
 }
 
-/// Mutable state for one `run_phase` invocation (avoids too many arguments).
-struct PhaseState<'a, R: Rng> {
-    rng: &'a mut R,
-    live: &'a mut Vec<std::path::PathBuf>,
-    file_counter: &'a mut usize,
-}
-
-/// Run workload for up to `duration`. Returns number of ops completed.
-/// Simulates the daemon: events accumulate; every poll_interval_sec we call ingest+reorganize (daemon "peek").
-fn run_phase<R: Rng>(
-    config: &WorkloadConfig,
-    hot_path: &Path,
-    policy: &mut dyn PolicyEngine,
-    phase: &mut PhaseState<'_, R>,
-    now: SystemTime,
-    duration: Duration,
-) -> Result<u64, anyhow::Error> {
-    let start = Instant::now();
-    let poll_interval = Duration::from_secs_f64(config.poll_interval_sec);
-    let hot_delay = Duration::from_micros(config.hot_delay_us);
-    let cold_access_delay = Duration::from_micros(config.cold_access_delay_us);
-    let mut last_poll = Instant::now();
-    let mut events: Vec<AccessEvent> = Vec::new();
-    let mut ops_done: u64 = 0;
-
-    while start.elapsed() < duration {
-        let op = choose_op(config, phase.live, phase.rng);
-        match op {
-            Op::Create => {
-                let path = make_nested_path(hot_path, config.depth, *phase.file_counter);
-                *phase.file_counter += 1;
-                create_file(&path, config.file_size)?;
-                phase.live.push(path.clone());
-                events.push(AccessEvent {
-                    path: path.clone(),
-                    kind: FsEventKind::Create,
-                    timestamp: now,
-                });
-                events.push(AccessEvent {
-                    path,
-                    kind: FsEventKind::Modify,
-                    timestamp: now,
-                });
-            }
-            Op::Delete => {
-                let i = phase.rng.gen_range(0..phase.live.len());
-                let path = phase.live.remove(i);
-                if path.exists() {
-                    fs::remove_file(&path).ok();
-                }
-                events.push(AccessEvent {
-                    path: path.clone(),
-                    kind: FsEventKind::Remove,
-                    timestamp: now,
-                });
-            }
-            Op::Edit => {
-                let i = skewed_index(phase.live.len(), config.skew, phase.rng);
-                let path = &phase.live[i];
-                if path.exists() {
-                    // Check before I/O: is this file currently cold (symlink to cold tier)?
-                    let is_cold = !cold_access_delay.is_zero()
-                        && fs::symlink_metadata(path)
-                            .map(|m| m.file_type().is_symlink())
-                            .unwrap_or(false);
-                    let mut data = fs::read(path)?;
-                    data.resize(config.file_size, b'x');
-                    fs::write(path, &data)?;
-                    events.push(AccessEvent {
-                        path: path.clone(),
-                        kind: FsEventKind::Modify,
-                        timestamp: now,
-                    });
-                    // Penalize cold file access: policy paid the price of missing the hot set.
-                    if is_cold {
-                        std::thread::sleep(cold_access_delay);
-                    }
-                }
-            }
-        }
-
-        if !hot_delay.is_zero() {
-            std::thread::sleep(hot_delay);
-        }
-
-        ops_done += 1;
-
-        // Daemon peek: ingest + reorganize every poll_interval (events accumulate between polls)
-        if last_poll.elapsed() >= poll_interval {
-            policy.ingest(&events);
-            policy.reorganize().map_err(|e| anyhow::anyhow!("{}", e))?;
-            events.clear();
-            last_poll = Instant::now();
-        }
-    }
-
-    if !events.is_empty() {
-        policy.ingest(&events);
-        policy.reorganize().map_err(|e| anyhow::anyhow!("{}", e))?;
-    }
-
-    Ok(ops_done)
-}
+// ── Workload loop ─────────────────────────────────────────────────────────────
 
 enum Op {
     Create,
@@ -343,7 +284,65 @@ enum Op {
     Edit,
 }
 
-fn choose_op<R: Rng>(config: &WorkloadConfig, live: &[std::path::PathBuf], rng: &mut R) -> Op {
+/// Pure-filesystem workload: creates, deletes, and edits files in `hot_path`.
+/// Emits no events — the daemon thread's `FsWatcher` picks them up from the OS.
+/// The only sleep here is `cold_access_delay` on cold-file edits, which is
+/// intentional: it models the true cost of a placement miss.
+fn workload_loop<R: Rng>(
+    config: &WorkloadConfig,
+    hot_path: &Path,
+    rng: &mut R,
+    live: &mut Vec<PathBuf>,
+    file_counter: &mut usize,
+    cold_access_delay: Duration,
+    duration: Duration,
+) -> Result<u64> {
+    let start = Instant::now();
+    let mut ops_done = 0u64;
+
+    while start.elapsed() < duration {
+        match choose_op(config, live, rng) {
+            Op::Create => {
+                let path = make_nested_path(hot_path, config.depth, *file_counter);
+                *file_counter += 1;
+                create_file(&path, config.file_size)?;
+                live.push(path);
+            }
+            Op::Delete => {
+                let i = rng.gen_range(0..live.len());
+                let path = live.remove(i);
+                if path.exists() {
+                    fs::remove_file(&path).ok();
+                }
+            }
+            Op::Edit => {
+                let i = skewed_index(live.len(), config.skew, rng);
+                let path = &live[i];
+                if path.exists() {
+                    // Check symlink status before I/O: symlink = cold file = placement miss.
+                    let is_cold = !cold_access_delay.is_zero()
+                        && fs::symlink_metadata(path)
+                            .map(|m| m.file_type().is_symlink())
+                            .unwrap_or(false);
+                    let mut data = fs::read(path)?;
+                    data.resize(config.file_size, b'x');
+                    fs::write(path, &data)?;
+                    if is_cold {
+                        thread::sleep(cold_access_delay);
+                    }
+                }
+            }
+        }
+        ops_done += 1;
+    }
+
+    Ok(ops_done)
+}
+
+fn choose_op<R: Rng>(config: &WorkloadConfig, live: &[PathBuf], rng: &mut R) -> Op {
+    if live.is_empty() {
+        return Op::Create;
+    }
     let c = config.create_pct as u32;
     let d = config.delete_pct as u32;
     let e = config.edit_pct as u32;
@@ -352,9 +351,6 @@ fn choose_op<R: Rng>(config: &WorkloadConfig, live: &[std::path::PathBuf], rng: 
         return Op::Create;
     }
     let x = rng.gen_range(0..total);
-    if live.is_empty() {
-        return Op::Create;
-    }
     if x < c {
         Op::Create
     } else if x < c + d {
@@ -364,7 +360,7 @@ fn choose_op<R: Rng>(config: &WorkloadConfig, live: &[std::path::PathBuf], rng: 
     }
 }
 
-fn make_nested_path(root: &Path, depth: usize, file_id: usize) -> std::path::PathBuf {
+fn make_nested_path(root: &Path, depth: usize, file_id: usize) -> PathBuf {
     let mut p = root.to_path_buf();
     for i in 0..depth {
         p.push(format!("dir_{}", i));
@@ -374,19 +370,17 @@ fn make_nested_path(root: &Path, depth: usize, file_id: usize) -> std::path::Pat
     p
 }
 
-/// Pick an index in [0, len) with power-law skew.
-/// skew=1.0 → uniform; skew=2.0 → quadratic concentration toward index 0; etc.
+/// Power-law index: skew=1.0 → uniform; skew>1 → concentrated toward index 0 (old files);
+/// skew<1 → concentrated toward index len-1 (newest files).
 fn skewed_index<R: Rng>(len: usize, skew: f64, rng: &mut R) -> usize {
     let u: f64 = rng.r#gen();
-    let i = (len as f64 * u.powf(skew)) as usize;
-    i.min(len - 1)
+    ((len as f64 * u.powf(skew)) as usize).min(len - 1)
 }
 
 fn create_file(path: &Path, size: usize) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let data = vec![b'x'; size];
-    fs::write(path, data)?;
+    fs::write(path, vec![b'x'; size])?;
     Ok(())
 }

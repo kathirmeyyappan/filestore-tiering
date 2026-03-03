@@ -48,7 +48,10 @@ pub struct AccessEvent {
 ///
 /// The main loop calls `ingest` with new FS events, then `reorganize`
 /// to let the engine move files between tiers as it sees fit.
-pub trait PolicyEngine {
+///
+/// Requires `Send` so the benchmark can run the daemon in a dedicated thread
+/// while the workload runs on the main thread (matching production architecture).
+pub trait PolicyEngine: Send {
     /// Validate that (hot, cold_storage) is acceptable for this policy.
     /// Called before construction; return `Err` to reject (e.g. wrong number of tiers).
     fn validate_config(
