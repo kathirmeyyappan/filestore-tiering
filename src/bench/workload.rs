@@ -29,8 +29,6 @@ pub struct WorkloadConfig {
     /// Edit target skew: 1.0 = uniform, higher = more concentrated on a hot subset.
     /// Index chosen as floor(len * u^skew) where u ~ Uniform[0,1).
     pub skew: f64,
-    /// Artificial per-op I/O delay in microseconds (simulates hot-tier latency). 0 = no delay.
-    pub hot_delay_us: u64,
     /// Artificial per-access I/O delay in microseconds applied when an edit targets a cold file
     /// (hot path is a symlink). Simulates the latency of reading/writing cold storage in-request,
     /// directly penalizing policies that keep the wrong files in hot. This is the primary knob
@@ -59,13 +57,13 @@ pub struct BenchResult {
 }
 
 /// CSV header line for benchmark output (use with --header).
-pub const CSV_HEADER: &str = "policy,warmup_sec,measure_sec,poll_interval_sec,depth,hot_cap,file_size,create_pct,delete_pct,edit_pct,batch_size,skew,hot_delay_us,cold_access_delay_us,measure_ops,throughput,promotions,demotions,demotions_tier0,promotions_pct,demotions_pct,hot_edits,cold_edits,hit_rate";
+pub const CSV_HEADER: &str = "policy,warmup_sec,measure_sec,poll_interval_sec,depth,hot_cap,file_size,create_pct,delete_pct,edit_pct,batch_size,skew,cold_access_delay_us,measure_ops,throughput,promotions,demotions,demotions_tier0,promotions_pct,demotions_pct,hot_edits,cold_edits,hit_rate";
 
 impl BenchResult {
     /// Single CSV row for this result.
     pub fn to_csv_row(&self) -> String {
         format!(
-            "{},{},{},{},{},{},{},{},{},{},{},{:.1},{},{},{},{:.1},{},{},{},{:.4},{:.4},{},{},{:.4}",
+            "{},{},{},{},{},{},{},{},{},{},{},{:.1},{},{},{:.1},{},{},{},{:.4},{:.4},{},{},{:.4}",
             self.config.policy,
             self.config.warmup_sec,
             self.config.measure_sec,
@@ -78,7 +76,6 @@ impl BenchResult {
             self.config.edit_pct,
             self.config.batch_size,
             self.config.skew,
-            self.config.hot_delay_us,
             self.config.cold_access_delay_us,
             self.measure_ops,
             self.throughput,
@@ -106,7 +103,6 @@ impl BenchResult {
   file_size         {} B  (created and edited file size)
   create/delete/edit  {}% / {}% / {}%
   skew              {:.1}  (1.0 = uniform, higher = hot subset)
-  hot_delay         {} µs  (per-op hot-tier I/O delay)
   cold_access_delay {} µs  (per-edit cold-file access penalty)
   ─────────────────────────────────
   measure_ops       {}
@@ -126,7 +122,6 @@ impl BenchResult {
             self.config.delete_pct,
             self.config.edit_pct,
             self.config.skew,
-            self.config.hot_delay_us,
             self.config.cold_access_delay_us,
             self.measure_ops,
             self.throughput,
@@ -283,7 +278,6 @@ fn run_phase<R: Rng>(
 ) -> Result<PhaseResult, anyhow::Error> {
     let start = Instant::now();
     let poll_interval = Duration::from_secs_f64(config.poll_interval_sec);
-    let hot_delay = Duration::from_micros(config.hot_delay_us);
     let cold_access_delay = Duration::from_micros(config.cold_access_delay_us);
     let mut last_poll = Instant::now();
     let mut events: Vec<AccessEvent> = Vec::new();
@@ -346,10 +340,6 @@ fn run_phase<R: Rng>(
                     }
                 }
             }
-        }
-
-        if !hot_delay.is_zero() {
-            std::thread::sleep(hot_delay);
         }
 
         ops_done += 1;

@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use filestore_tiering::bench::{BenchResult, WorkloadConfig, run};
 
-const POLICIES: &[&str] = &["basic_lru", "arc", "lfu"];
+const POLICIES: &[&str] = &["basic_lru", "arc", "lfu", "lru_2q"];
 
 fn base_config() -> WorkloadConfig {
     WorkloadConfig {
@@ -20,8 +20,6 @@ fn base_config() -> WorkloadConfig {
         edit_pct: 85,
         batch_size: 1,
         skew: 1.0,
-        hot_delay_us: 0,
-        cold_delay_us: 0,
         cold_access_delay_us: 0,
     }
 }
@@ -72,7 +70,7 @@ fn presets() -> Vec<Preset> {
             description: "Slow cold storage: skew=3.0, cold_delay=5000us",
             apply: |cfg| {
                 cfg.skew = 3.0;
-                cfg.cold_delay_us = 5_000;
+                cfg.cold_access_delay_us = 5_000;
             },
         },
         // ── Presets designed to expose policy differences via cold_access_delay_us ──
