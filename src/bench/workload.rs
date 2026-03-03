@@ -16,6 +16,7 @@
 //! `notify` crate handle event delivery exactly as they do in production.
 
 use std::fs;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -203,9 +204,13 @@ pub fn run(config: WorkloadConfig) -> Result<BenchResult> {
                     // "not enough hot capacity", permission denied, disk full) is fatal.
                     if let Err(e) = pol.reorganize() {
                         let msg = e.to_string();
+                        // Concurrent-deletion races produce ENOENT in move_to_tier when a
+                        // file disappears between the policy's existence check and the
+                        // underlying rename/symlink syscall. Benign: next reconcile corrects
+                        // state. All other errors (capacity failures, permission errors, etc.)
+                        // are fatal and must surface.
                         let is_enoent = msg.contains("No such file or directory")
-                            || msg.contains("does not exist")
-                            || msg.contains("not found");
+                            || msg.contains("does not exist");
                         if !is_enoent {
                             return Err(anyhow::anyhow!("reorganize failed: {}", e));
                         }
@@ -385,7 +390,17 @@ fn workload_loop<R: Rng>(
                     };
                     let mut data = data;
                     data.resize(config.file_size, b'x');
-                    match fs::write(path, &data) {
+                    // Open WITHOUT O_CREAT so we never re-create a file that the
+                    // daemon just renamed away mid-eviction. fs::write uses O_CREAT
+                    // which would create a new regular file at hot_path while the
+                    // daemon is between rename(hot→cold) and symlink(cold→hot),
+                    // causing the symlink call to get EEXIST.
+                    let write_result = fs::OpenOptions::new()
+                        .write(true)
+                        .truncate(true)
+                        .open(path)
+                        .and_then(|mut f| f.write_all(&data));
+                    match write_result {
                         Ok(()) => {}
                         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                             ops_done += 1;
