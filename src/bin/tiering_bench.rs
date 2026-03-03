@@ -58,10 +58,11 @@ struct Cli {
     #[arg(long, default_value_t = 0)]
     hot_delay_us: u64,
 
-    /// Cold-tier per-move I/O delay in microseconds. Applied per promote/demote to simulate
-    /// slow cold storage. 0 = no delay.
+    /// Cold-tier per-access I/O delay in microseconds. Applied each time an edit targets a file
+    /// that is currently cold (hot path is a symlink). Directly penalizes policies that keep the
+    /// wrong files in hot. 0 = no delay.
     #[arg(long, default_value_t = 0)]
-    cold_delay_us: u64,
+    cold_access_delay_us: u64,
 
     #[arg(long)]
     header: bool,
@@ -93,7 +94,7 @@ fn main() -> Result<()> {
         batch_size: cli.batch_size,
         skew: cli.skew,
         hot_delay_us: cli.hot_delay_us,
-        cold_delay_us: cli.cold_delay_us,
+        cold_access_delay_us: cli.cold_access_delay_us,
     };
 
     let result = run(config)?;
