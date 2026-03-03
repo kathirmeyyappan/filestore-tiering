@@ -68,6 +68,25 @@ pub struct WorkloadConfig {
     /// index in the live list); <1 = concentrated on newest files (high index).
     /// Sampled as floor(len * u^skew), u ~ Uniform[0,1).
     pub skew: f64,
+    /// Optional phases for the measurement window. When non-empty, parameters
+    /// (skew, create/delete/edit pct) switch at phase boundaries. The warmup
+    /// always uses the first phase's parameters. Phase fractions are normalized
+    /// so they sum to 1.0. When empty, the top-level parameters are used
+    /// throughout (single-phase backward-compatible behavior).
+    pub phases: Vec<WorkloadPhase>,
+}
+
+/// A phase within a multi-phase workload trace. Overrides the per-op
+/// parameters (skew, create/delete/edit ratios) for a fraction of the
+/// measurement window.
+#[derive(Debug, Clone)]
+pub struct WorkloadPhase {
+    /// Fraction of measure_ops this phase occupies (will be normalized).
+    pub fraction: f64,
+    pub skew: f64,
+    pub create_pct: u8,
+    pub delete_pct: u8,
+    pub edit_pct: u8,
 }
 
 // ── Trace ──────────────────────────────────────────────────────────────────────
@@ -103,8 +122,24 @@ pub fn generate_trace<R: Rng>(config: &WorkloadConfig, rng: &mut R) -> WorkloadT
     let mut live_count = 0usize;
     let mut file_counter = 0usize;
 
-    for _ in 0..total {
-        let op = match choose_op_type(config, live_count, rng) {
+    // Build phase list with cumulative boundaries for the measurement window.
+    // Warmup (ops 0..warmup_ops) always uses phase 0 params.
+    // Measurement (ops warmup_ops..total) is split across phases.
+    let phases = build_phases(config);
+    let measure_start = config.warmup_ops as usize;
+
+    for i in 0..total {
+        let active = if i < measure_start {
+            &phases[0]
+        } else {
+            let mi = i - measure_start;
+            phases
+                .iter()
+                .find(|p| mi < p.measure_end)
+                .unwrap_or(phases.last().unwrap())
+        };
+
+        let op = match choose_op_type_params(active, live_count, rng) {
             OpType::Create => {
                 let size = rng.gen_range(config.min_file_size..=config.max_file_size);
                 let id = file_counter;
@@ -118,7 +153,7 @@ pub fn generate_trace<R: Rng>(config: &WorkloadConfig, rng: &mut R) -> WorkloadT
                 WorkloadOp::Delete { live_idx: idx }
             }
             OpType::Edit => {
-                let idx = skewed_index(live_count, config.skew, rng);
+                let idx = skewed_index(live_count, active.skew, rng);
                 let size = rng.gen_range(config.min_file_size..=config.max_file_size);
                 WorkloadOp::Edit {
                     live_idx: idx,
@@ -134,6 +169,52 @@ pub fn generate_trace<R: Rng>(config: &WorkloadConfig, rng: &mut R) -> WorkloadT
         warmup: ops,
         measure,
     }
+}
+
+/// Flattened per-phase parameters used during trace generation.
+struct PhaseParams {
+    skew: f64,
+    create_pct: u8,
+    delete_pct: u8,
+    edit_pct: u8,
+    /// Cumulative end index within the measurement window (exclusive).
+    measure_end: usize,
+}
+
+/// Build phase parameter list with cumulative boundaries from config.
+fn build_phases(config: &WorkloadConfig) -> Vec<PhaseParams> {
+    if config.phases.is_empty() {
+        return vec![PhaseParams {
+            skew: config.skew,
+            create_pct: config.create_pct,
+            delete_pct: config.delete_pct,
+            edit_pct: config.edit_pct,
+            measure_end: config.measure_ops as usize,
+        }];
+    }
+    let total_frac: f64 = config.phases.iter().map(|p| p.fraction).sum();
+    let measure = config.measure_ops as usize;
+    let mut cumulative = 0usize;
+    config
+        .phases
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            let end = if i == config.phases.len() - 1 {
+                measure
+            } else {
+                cumulative += ((p.fraction / total_frac) * measure as f64) as usize;
+                cumulative
+            };
+            PhaseParams {
+                skew: p.skew,
+                create_pct: p.create_pct,
+                delete_pct: p.delete_pct,
+                edit_pct: p.edit_pct,
+                measure_end: end,
+            }
+        })
+        .collect()
 }
 
 // ── Results ────────────────────────────────────────────────────────────────────
@@ -457,13 +538,23 @@ enum OpType {
     Edit,
 }
 
-fn choose_op_type<R: Rng>(config: &WorkloadConfig, live_count: usize, rng: &mut R) -> OpType {
+fn choose_op_type_params<R: Rng>(params: &PhaseParams, live_count: usize, rng: &mut R) -> OpType {
+    choose_op_type_raw(params.create_pct, params.delete_pct, params.edit_pct, live_count, rng)
+}
+
+fn choose_op_type_raw<R: Rng>(
+    create_pct: u8,
+    delete_pct: u8,
+    edit_pct: u8,
+    live_count: usize,
+    rng: &mut R,
+) -> OpType {
     if live_count == 0 {
         return OpType::Create;
     }
-    let c = config.create_pct as u32;
-    let d = config.delete_pct as u32;
-    let e = config.edit_pct as u32;
+    let c = create_pct as u32;
+    let d = delete_pct as u32;
+    let e = edit_pct as u32;
     let total = c + d + e;
     if total == 0 {
         return OpType::Create;

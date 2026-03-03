@@ -87,6 +87,7 @@ fn main() -> Result<()> {
         delete_pct: cli.delete_pct,
         edit_pct: cli.edit_pct,
         skew: cli.skew,
+        phases: vec![],
     };
 
     let result = run(config)?;
