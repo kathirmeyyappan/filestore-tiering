@@ -424,6 +424,7 @@ impl PolicyEngine for BasicLruPolicy {
             promotions: self.total_promotions,
             demotions: self.total_demotions,
             demotions_to_tier: self.demotions_to_tier.clone(),
+            bytes_written_to_tier: self.tier_state.bytes_written_to_tier().to_vec(),
         }
     }
 }

@@ -1,7 +1,7 @@
-//! CLI for the tiering benchmark: time-based run with warmup, then measure throughput and move counts.
+//! CLI for the tiering benchmark.
 //!
-//! Run: cargo run --bin tiering_bench -- --policy basic_lru --measure-sec 30
-//! Or:  cargo run --bin tiering_bench -- --header  # print CSV header only
+//! Run:    cargo run --bin tiering_bench -- --policy basic_lru
+//! Header: cargo run --bin tiering_bench -- --header
 
 use anyhow::Result;
 use clap::Parser;
@@ -10,63 +10,58 @@ use filestore_tiering::bench::{CSV_HEADER, WorkloadConfig, run};
 use filestore_tiering::capacity::parse_capacity;
 
 #[derive(Parser)]
-#[command(about = "Time-based benchmark: warmup, then measure throughput and promotions/demotions")]
+#[command(
+    about = "Tiering benchmark: hit rate, promotion/demotion counts, and bytes written per tier"
+)]
 struct Cli {
     #[arg(long, default_value = "basic_lru")]
     policy: String,
 
-    /// Warmup duration in seconds before measurement.
-    #[arg(long, default_value_t = 5.0)]
-    warmup_sec: f64,
+    /// Number of operations for the warmup phase (warms up policy state; excluded from metrics).
+    #[arg(long, default_value_t = 1_000)]
+    warmup_ops: u64,
 
-    /// Measurement duration in seconds (throughput and move counts during this window).
-    #[arg(long, default_value_t = 30.0)]
-    measure_sec: f64,
+    /// Number of operations for the measurement phase.
+    #[arg(long, default_value_t = 5_000)]
+    measure_ops: u64,
 
-    /// Daemon poll interval in seconds: ingest+reorganize this often (events accumulate between polls). Default 0.2 = 5 peeks/sec.
-    #[arg(long, default_value_t = 0.2)]
-    poll_interval_sec: f64,
+    /// Daemon wakes (ingest + reorganize) after every N workload operations.
+    #[arg(long, default_value_t = 50)]
+    poll_interval_ops: usize,
 
     #[arg(long, short = 'd', default_value_t = 3)]
     depth: usize,
 
-    /// Hot tier capacity. Default 20K keeps ~40 files in hot so creates quickly exceed it and cause turnover.
+    /// Hot tier capacity in bytes. With avg file size ~1152 B, "20K" ≈ 17 files in hot.
     #[arg(long, default_value = "20K", value_parser = parse_capacity)]
     hot_capacity: u64,
 
-    #[arg(long, default_value_t = 500)]
-    file_size: usize,
+    /// Minimum file size in bytes (inclusive). Files are sized uniformly in [min, max].
+    #[arg(long, default_value_t = 256)]
+    min_file_size: usize,
 
-    #[arg(long, default_value_t = 50)]
+    /// Maximum file size in bytes (inclusive).
+    #[arg(long, default_value_t = 2_048)]
+    max_file_size: usize,
+
+    #[arg(long, default_value_t = 10)]
     create_pct: u8,
 
-    #[arg(long, default_value_t = 0)]
+    #[arg(long, default_value_t = 5)]
     delete_pct: u8,
 
-    #[arg(long, default_value_t = 50)]
+    #[arg(long, default_value_t = 85)]
     edit_pct: u8,
 
-    #[arg(long, default_value_t = 1)]
-    batch_size: usize,
-
-    /// Edit target skew: 1.0 = uniform random, higher = concentrated on a hot subset.
-    /// E.g. 2.0 → ~64% of edits hit ~20% of files; 3.0 → ~80% hit ~20%.
+    /// Edit-target skew. 1.0 = uniform; >1 = concentrated on oldest files; <1 = newest.
     #[arg(long, default_value_t = 1.0)]
     skew: f64,
 
-    /// Hot-tier per-op I/O delay in microseconds. Simulates hot storage latency. 0 = no delay.
-    #[arg(long, default_value_t = 0)]
-    hot_delay_us: u64,
-
-    /// Cold-tier per-move I/O delay in microseconds. Applied per promote/demote to simulate
-    /// slow cold storage. 0 = no delay.
-    #[arg(long, default_value_t = 0)]
-    cold_delay_us: u64,
-
+    /// Print CSV header and exit.
     #[arg(long)]
     header: bool,
 
-    /// Output one CSV line (for scripts). Default is a human-readable summary.
+    /// Output a single CSV row (for scripting). Default is human-readable.
     #[arg(long)]
     csv: bool,
 }
@@ -81,19 +76,17 @@ fn main() -> Result<()> {
 
     let config = WorkloadConfig {
         policy: cli.policy,
-        warmup_sec: cli.warmup_sec,
-        measure_sec: cli.measure_sec,
-        poll_interval_sec: cli.poll_interval_sec,
+        warmup_ops: cli.warmup_ops,
+        measure_ops: cli.measure_ops,
+        poll_interval_ops: cli.poll_interval_ops,
         depth: cli.depth,
         hot_capacity: cli.hot_capacity,
-        file_size: cli.file_size,
+        min_file_size: cli.min_file_size,
+        max_file_size: cli.max_file_size,
         create_pct: cli.create_pct,
         delete_pct: cli.delete_pct,
         edit_pct: cli.edit_pct,
-        batch_size: cli.batch_size,
         skew: cli.skew,
-        hot_delay_us: cli.hot_delay_us,
-        cold_delay_us: cli.cold_delay_us,
     };
 
     let result = run(config)?;
