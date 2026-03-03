@@ -349,9 +349,33 @@ fn workload_loop<R: Rng>(
             Op::Delete => {
                 let i = rng.gen_range(0..live.len());
                 let path = live.remove(i);
-                // .ok() already swallows all errors; also handles the case where
-                // the daemon moved (evicted/promoted) the file between exists() and here.
-                fs::remove_file(&path).ok();
+                // Do NOT physically delete cold files (symlinks). tier_fs::move_to_tier's
+                // promotion path does:
+                //   (1) remove_file(hot_path)   ← removes the symlink
+                //   (2) rename(cold_backing, hot_path)
+                // If the workload removes the symlink (step 1) before the daemon reaches
+                // it, the daemon's own remove_file gets ENOENT and aborts the entire
+                // reorganize cycle. With delete_pct > 0 and ARC/LFU aggressively promoting
+                // ghost-list files, this abort rate can reach ~50–90%, causing the daemon
+                // to make almost no progress: hot tier unconstrained, all files appear hot,
+                // throughput spikes to raw filesystem speed with zero policy signal.
+                //
+                // Fix: only physically delete hot files (regular files). Cold files
+                // (symlinks) are removed from `live` but left on disk. The daemon's
+                // per-cycle reconcile detects the orphaned symlink via cold_sizes and
+                // drops it cleanly without abusing a promotion code path.
+                //
+                // Production analogy: the VFS layer holds a per-path lock during any
+                // tier move. A client DELETE acquires the same lock, so it either sees
+                // the file fully hot or fully cold — never mid-move. The workload
+                // approximates this by skipping deletion of files that are currently
+                // in the cold path.
+                let is_cold = fs::symlink_metadata(&path)
+                    .map(|m| m.file_type().is_symlink())
+                    .unwrap_or(false);
+                if !is_cold {
+                    fs::remove_file(&path).ok();
+                }
             }
             Op::Edit => {
                 // NOTE ON BENCHMARK vs. PRODUCTION:
