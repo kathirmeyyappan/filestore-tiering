@@ -324,9 +324,27 @@ fn workload_loop<R: Rng>(
                         && fs::symlink_metadata(path)
                             .map(|m| m.file_type().is_symlink())
                             .unwrap_or(false);
-                    let mut data = fs::read(path)?;
+                    // The daemon runs concurrently and may be mid-eviction (hot file renamed
+                    // to cold, symlink not yet created) when we arrive here. Treat NotFound
+                    // as "file is in transit — skip this op" rather than a fatal error.
+                    let data = match fs::read(path) {
+                        Ok(d) => d,
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                            ops_done += 1;
+                            continue;
+                        }
+                        Err(e) => return Err(e.into()),
+                    };
+                    let mut data = data;
                     data.resize(config.file_size, b'x');
-                    fs::write(path, &data)?;
+                    match fs::write(path, &data) {
+                        Ok(()) => {}
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                            ops_done += 1;
+                            continue;
+                        }
+                        Err(e) => return Err(e.into()),
+                    }
                     if is_cold {
                         thread::sleep(cold_access_delay);
                     }
