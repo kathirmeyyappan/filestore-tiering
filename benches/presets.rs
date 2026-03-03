@@ -92,13 +92,13 @@ fn print_table(preset_name: &str, description: &str, results: &[BenchResult]) {
     println!("    {}", description);
     println!();
     println!(
-        "  {:<12} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10}",
-        "policy", "ops/s", "ops", "promos", "demos", "promo%", "demo%"
+        "  {:<12} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10}",
+        "policy", "ops/s", "ops", "promos", "demos", "promo%", "demo%", "hit%"
     );
-    println!("  {}", "-".repeat(74));
+    println!("  {}", "-".repeat(84));
     for r in results {
         println!(
-            "  {:<12} {:>10.1} {:>10} {:>10} {:>10} {:>10.2} {:>10.2}",
+            "  {:<12} {:>10.1} {:>10} {:>10} {:>10} {:>10.2} {:>10.2} {:>10.2}",
             r.config.policy,
             r.throughput,
             r.measure_ops,
@@ -106,6 +106,7 @@ fn print_table(preset_name: &str, description: &str, results: &[BenchResult]) {
             r.demotions,
             r.promotions_pct,
             r.demotions_pct,
+            r.hit_rate * 100.0,
         );
     }
 }

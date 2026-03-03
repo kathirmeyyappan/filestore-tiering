@@ -47,16 +47,22 @@ pub struct BenchResult {
     pub demotions_tier0: u64,
     pub promotions_pct: f64,
     pub demotions_pct: f64,
+    /// Edits that hit a hot file (regular file, not symlink).
+    pub hot_edits: u64,
+    /// Edits that hit a cold file (symlink to cold tier).
+    pub cold_edits: u64,
+    /// Hot hit rate: hot_edits / (hot_edits + cold_edits). 1.0 = perfect placement.
+    pub hit_rate: f64,
 }
 
 /// CSV header line for benchmark output (use with --header).
-pub const CSV_HEADER: &str = "policy,warmup_sec,measure_sec,poll_interval_sec,depth,hot_cap,file_size,create_pct,delete_pct,edit_pct,batch_size,skew,hot_delay_us,cold_delay_us,measure_ops,throughput,promotions,demotions,demotions_tier0,promotions_pct,demotions_pct";
+pub const CSV_HEADER: &str = "policy,warmup_sec,measure_sec,poll_interval_sec,depth,hot_cap,file_size,create_pct,delete_pct,edit_pct,batch_size,skew,hot_delay_us,cold_delay_us,measure_ops,throughput,promotions,demotions,demotions_tier0,promotions_pct,demotions_pct,hot_edits,cold_edits,hit_rate";
 
 impl BenchResult {
     /// Single CSV row for this result.
     pub fn to_csv_row(&self) -> String {
         format!(
-            "{},{},{},{},{},{},{},{},{},{},{},{:.1},{},{},{},{:.1},{},{},{},{:.4},{:.4}",
+            "{},{},{},{},{},{},{},{},{},{},{},{:.1},{},{},{},{:.1},{},{},{},{:.4},{:.4},{},{},{:.4}",
             self.config.policy,
             self.config.warmup_sec,
             self.config.measure_sec,
@@ -78,6 +84,9 @@ impl BenchResult {
             self.demotions_tier0,
             self.promotions_pct,
             self.demotions_pct,
+            self.hot_edits,
+            self.cold_edits,
+            self.hit_rate,
         )
     }
 
@@ -101,6 +110,7 @@ impl BenchResult {
   throughput        {:.1} ops/s
   promotions       {}  ({:.2}% of ops)
   demotions        {}  (tier 0: {})  ({:.2}% of ops)
+  hit_rate          {:.2}%  ({} hot / {} cold edits)
 "#,
             self.config.policy,
             self.config.warmup_sec,
@@ -122,6 +132,9 @@ impl BenchResult {
             self.demotions,
             self.demotions_tier0,
             self.demotions_pct,
+            self.hit_rate * 100.0,
+            self.hot_edits,
+            self.cold_edits,
         )
     }
 }
@@ -167,8 +180,8 @@ pub fn run(config: WorkloadConfig) -> Result<BenchResult> {
 
     let stats_after_warmup = policy.stats();
 
-    // Measurement: run for measure_sec, count ops
-    let measure_ops = run_phase(
+    // Measurement: run for measure_sec, count ops and hit rate
+    let phase = run_phase(
         &config,
         &hot_path,
         &mut *policy,
@@ -180,6 +193,9 @@ pub fn run(config: WorkloadConfig) -> Result<BenchResult> {
         now,
         measure_duration,
     )?;
+    let measure_ops = phase.ops_done;
+    let hot_edits = phase.hot_edits;
+    let cold_edits = phase.cold_edits;
     let stats_after_measure = policy.stats();
 
     let promotions = stats_after_measure
@@ -216,6 +232,12 @@ pub fn run(config: WorkloadConfig) -> Result<BenchResult> {
     } else {
         0.0
     };
+    let total_edits = hot_edits + cold_edits;
+    let hit_rate = if total_edits > 0 {
+        hot_edits as f64 / total_edits as f64
+    } else {
+        0.0
+    };
 
     Ok(BenchResult {
         config,
@@ -227,6 +249,9 @@ pub fn run(config: WorkloadConfig) -> Result<BenchResult> {
         demotions_tier0,
         promotions_pct,
         demotions_pct,
+        hot_edits,
+        cold_edits,
+        hit_rate,
     })
 }
 
@@ -237,7 +262,13 @@ struct PhaseState<'a, R: Rng> {
     file_counter: &'a mut usize,
 }
 
-/// Run workload for up to `duration`. Returns number of ops completed.
+struct PhaseResult {
+    ops_done: u64,
+    hot_edits: u64,
+    cold_edits: u64,
+}
+
+/// Run workload for up to `duration`. Returns ops completed and hit/miss counts.
 /// Simulates the daemon: events accumulate; every poll_interval_sec we call ingest+reorganize (daemon "peek").
 fn run_phase<R: Rng>(
     config: &WorkloadConfig,
@@ -246,7 +277,7 @@ fn run_phase<R: Rng>(
     phase: &mut PhaseState<'_, R>,
     now: SystemTime,
     duration: Duration,
-) -> Result<u64, anyhow::Error> {
+) -> Result<PhaseResult, anyhow::Error> {
     let start = Instant::now();
     let poll_interval = Duration::from_secs_f64(config.poll_interval_sec);
     let hot_delay = Duration::from_micros(config.hot_delay_us);
@@ -254,6 +285,8 @@ fn run_phase<R: Rng>(
     let mut last_poll = Instant::now();
     let mut events: Vec<AccessEvent> = Vec::new();
     let mut ops_done: u64 = 0;
+    let mut hot_edits: u64 = 0;
+    let mut cold_edits: u64 = 0;
 
     while start.elapsed() < duration {
         let op = choose_op(config, phase.live, phase.rng);
@@ -289,7 +322,12 @@ fn run_phase<R: Rng>(
             Op::Edit => {
                 let i = skewed_index(phase.live.len(), config.skew, phase.rng);
                 let path = &phase.live[i];
-                if path.exists() {
+                if let Ok(meta) = fs::symlink_metadata(path) {
+                    if meta.file_type().is_symlink() {
+                        cold_edits += 1;
+                    } else {
+                        hot_edits += 1;
+                    }
                     let mut data = fs::read(path)?;
                     data.resize(config.file_size, b'x');
                     fs::write(path, &data)?;
@@ -341,7 +379,11 @@ fn run_phase<R: Rng>(
         }
     }
 
-    Ok(ops_done)
+    Ok(PhaseResult {
+        ops_done,
+        hot_edits,
+        cold_edits,
+    })
 }
 
 enum Op {
