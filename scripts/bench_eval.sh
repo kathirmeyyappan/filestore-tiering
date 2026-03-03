@@ -10,7 +10,7 @@ cd "$(dirname "$0")/.."
 
 # Defaults (override with env)
 # Hardcode known policies; override with POLICIES env if needed.
-POLICIES="${POLICIES:-basic_lru arc lfu}"
+POLICIES="${POLICIES:-basic_lru arc lfu lru_2q}"
 WARMUP_SEC="${WARMUP_SEC:-5}"
 MEASURE_SEC="${MEASURE_SEC:-30}"
 POLL_INTERVAL_SEC="${POLL_INTERVAL_SEC:-0.2}"
@@ -20,6 +20,7 @@ CREATE_PCT="${CREATE_PCT:-50}"
 DELETE_PCT="${DELETE_PCT:-0}"
 EDIT_PCT="${EDIT_PCT:-50}"
 BATCH_SIZE="${BATCH_SIZE:-1}"
+COLD_ACCESS_DELAY_US="${COLD_ACCESS_DELAY_US:-0}"
 # Output CSV file (header + one row per policy)
 CSV_OUT="${CSV_OUT:-bench_results.csv}"
 
@@ -42,7 +43,8 @@ if [ -n "${VERBOSE:-}" ]; then
         --create-pct "$CREATE_PCT" \
         --delete-pct "$DELETE_PCT" \
         --edit-pct "$EDIT_PCT" \
-        --batch-size "$BATCH_SIZE"
+        --batch-size "$BATCH_SIZE" \
+        --cold-access-delay-us "$COLD_ACCESS_DELAY_US"
     done
   ) | tee "$CSV_OUT" | column -t -s,
 else
@@ -60,10 +62,11 @@ else
         --delete-pct "$DELETE_PCT" \
         --edit-pct "$EDIT_PCT" \
         --batch-size "$BATCH_SIZE" \
+        --cold-access-delay-us "$COLD_ACCESS_DELAY_US" \
         2>/dev/null
     done
   ) | tee "$CSV_OUT" | column -t -s,
 fi
 
 echo ""
-echo "Params: warmup=${WARMUP_SEC}s measure=${MEASURE_SEC}s poll_interval=${POLL_INTERVAL_SEC}s depth=$DEPTH hot_cap=$HOT_CAP create=$CREATE_PCT% delete=$DELETE_PCT% edit=$EDIT_PCT%"
+echo "Params: warmup=${WARMUP_SEC}s measure=${MEASURE_SEC}s poll_interval=${POLL_INTERVAL_SEC}s depth=$DEPTH hot_cap=$HOT_CAP create=$CREATE_PCT% delete=$DELETE_PCT% edit=$EDIT_PCT% cold_access_delay=${COLD_ACCESS_DELAY_US}us"
