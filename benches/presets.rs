@@ -26,7 +26,9 @@
 use std::io::Write;
 use std::time::Instant;
 
-use filestore_tiering::bench::{BenchResult, CSV_HEADER, WorkloadConfig, WorkloadPhase, generate_trace, run_with_trace};
+use filestore_tiering::bench::{
+    BenchResult, CSV_HEADER, WorkloadConfig, WorkloadPhase, generate_trace, run_with_trace,
+};
 
 const POLICIES: &[&str] = &["basic_lru", "arc", "lfu", "lru_2q"];
 
@@ -218,14 +220,38 @@ fn presets() -> Vec<Preset> {
             apply: |cfg| {
                 cfg.hot_capacity = 20_000;
                 cfg.min_file_size = 256;
-                cfg.max_file_size = 768;  // avg ~512 B → ~40 files fit, p granularity ~2.5%
+                cfg.max_file_size = 768; // avg ~512 B → ~40 files fit, p granularity ~2.5%
                 cfg.warmup_ops = 3_000;
                 cfg.measure_ops = 10_000;
                 cfg.phases = vec![
-                    WorkloadPhase { fraction: 0.25, skew: 4.0, create_pct: 10, delete_pct: 0, edit_pct: 90 },
-                    WorkloadPhase { fraction: 0.25, skew: 0.3, create_pct: 10, delete_pct: 0, edit_pct: 90 },
-                    WorkloadPhase { fraction: 0.25, skew: 4.0, create_pct: 10, delete_pct: 0, edit_pct: 90 },
-                    WorkloadPhase { fraction: 0.25, skew: 0.3, create_pct: 10, delete_pct: 0, edit_pct: 90 },
+                    WorkloadPhase {
+                        fraction: 0.25,
+                        skew: 4.0,
+                        create_pct: 10,
+                        delete_pct: 0,
+                        edit_pct: 90,
+                    },
+                    WorkloadPhase {
+                        fraction: 0.25,
+                        skew: 0.3,
+                        create_pct: 10,
+                        delete_pct: 0,
+                        edit_pct: 90,
+                    },
+                    WorkloadPhase {
+                        fraction: 0.25,
+                        skew: 4.0,
+                        create_pct: 10,
+                        delete_pct: 0,
+                        edit_pct: 90,
+                    },
+                    WorkloadPhase {
+                        fraction: 0.25,
+                        skew: 0.3,
+                        create_pct: 10,
+                        delete_pct: 0,
+                        edit_pct: 90,
+                    },
                 ];
             },
         },
@@ -267,8 +293,17 @@ fn print_table(preset_name: &str, description: &str, results: &[BenchResult]) {
     println!();
     println!(
         "  {:<12} {:>7} {:>7} {:>7} {:>7} {:>8} {:>9} {:>8} {:>9} {:>10} {:>10}",
-        "policy", "hit%", "creates", "deletes", "edits", "promos", "→hot_KB", "demos", "→cld_KB",
-        "ingest_ms", "reorg_ms"
+        "policy",
+        "hit%",
+        "creates",
+        "deletes",
+        "edits",
+        "promos",
+        "→hot_KB",
+        "demos",
+        "→cld_KB",
+        "ingest_ms",
+        "reorg_ms"
     );
     println!("  {}", "-".repeat(105));
     for r in results {
@@ -393,7 +428,10 @@ fn main() {
 
     if selected_presets.is_empty() || policies.is_empty() {
         eprintln!("\nUsage: cargo bench -- [preset_name...] [-p policy] [-q|--quick]");
-        eprintln!("  preset names: {:?}", all_presets.iter().map(|p| p.name).collect::<Vec<_>>());
+        eprintln!(
+            "  preset names: {:?}",
+            all_presets.iter().map(|p| p.name).collect::<Vec<_>>()
+        );
         eprintln!("  policies: {:?}", POLICIES);
     }
 }

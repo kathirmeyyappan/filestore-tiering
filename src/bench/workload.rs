@@ -573,7 +573,13 @@ enum OpType {
 }
 
 fn choose_op_type_params<R: Rng>(params: &PhaseParams, live_count: usize, rng: &mut R) -> OpType {
-    choose_op_type_raw(params.create_pct, params.delete_pct, params.edit_pct, live_count, rng)
+    choose_op_type_raw(
+        params.create_pct,
+        params.delete_pct,
+        params.edit_pct,
+        live_count,
+        rng,
+    )
 }
 
 fn choose_op_type_raw<R: Rng>(
