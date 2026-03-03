@@ -23,9 +23,10 @@
 //! (promotions and demotions respectively). Together with promo/demo counts they
 //! show the I/O cost of achieving the observed hit rate.
 
+use std::io::Write;
 use std::time::Instant;
 
-use filestore_tiering::bench::{BenchResult, WorkloadConfig, WorkloadPhase, generate_trace, run_with_trace};
+use filestore_tiering::bench::{BenchResult, CSV_HEADER, WorkloadConfig, WorkloadPhase, generate_trace, run_with_trace};
 
 const POLICIES: &[&str] = &["basic_lru", "arc", "lfu", "lru_2q"];
 
@@ -265,15 +266,18 @@ fn print_table(preset_name: &str, description: &str, results: &[BenchResult]) {
     println!("    {}", description);
     println!();
     println!(
-        "  {:<12} {:>7} {:>7} {:>7} {:>7} {:>8} {:>9} {:>8} {:>9}",
-        "policy", "hit%", "creates", "deletes", "edits", "promos", "→hot_KB", "demos", "→cld_KB"
+        "  {:<12} {:>7} {:>7} {:>7} {:>7} {:>8} {:>9} {:>8} {:>9} {:>10} {:>10}",
+        "policy", "hit%", "creates", "deletes", "edits", "promos", "→hot_KB", "demos", "→cld_KB",
+        "ingest_ms", "reorg_ms"
     );
-    println!("  {}", "-".repeat(83));
+    println!("  {}", "-".repeat(105));
     for r in results {
         let hot_kb = r.bytes_written_to_tier.first().copied().unwrap_or(0) as f64 / 1024.0;
         let cld_kb = r.bytes_written_to_tier.get(1).copied().unwrap_or(0) as f64 / 1024.0;
+        let ingest_ms = r.ingest_us as f64 / 1000.0;
+        let reorg_ms = r.reorganize_us as f64 / 1000.0;
         println!(
-            "  {:<12} {:>7.2} {:>7} {:>7} {:>7} {:>8} {:>9.1} {:>8} {:>9.1}",
+            "  {:<12} {:>7.2} {:>7} {:>7} {:>7} {:>8} {:>9.1} {:>8} {:>9.1} {:>10.1} {:>10.1}",
             r.config.policy,
             r.hit_rate * 100.0,
             r.total_creates,
@@ -283,6 +287,8 @@ fn print_table(preset_name: &str, description: &str, results: &[BenchResult]) {
             hot_kb,
             r.demotions,
             cld_kb,
+            ingest_ms,
+            reorg_ms,
         );
     }
 }
@@ -292,6 +298,7 @@ fn main() {
     let quick = args.iter().any(|a| a == "--quick" || a == "-q");
     let mut preset_filters: Vec<String> = Vec::new();
     let mut policy_filters: Vec<String> = Vec::new();
+    let mut csv_path: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -300,6 +307,14 @@ fn main() {
                 i += 1;
                 if i < args.len() {
                     policy_filters.push(args[i].clone());
+                }
+            }
+            "--csv" => {
+                i += 1;
+                if i < args.len() {
+                    csv_path = Some(args[i].clone());
+                } else {
+                    csv_path = Some("bench_results.csv".to_string());
                 }
             }
             other if !other.starts_with('-') => preset_filters.push(other.to_string()),
@@ -351,10 +366,12 @@ fn main() {
     );
 
     let overall_start = Instant::now();
+    let mut all_results: Vec<(&str, Vec<BenchResult>)> = Vec::new();
     for preset in &selected_presets {
         eprintln!("  [preset: {}]", preset.name);
         let results = run_preset(preset, &policies, quick);
         print_table(preset.name, preset.description, &results);
+        all_results.push((preset.name, results));
     }
 
     println!();
@@ -362,6 +379,17 @@ fn main() {
         "Total elapsed: {:.1}s",
         overall_start.elapsed().as_secs_f64()
     );
+
+    if let Some(path) = &csv_path {
+        let mut f = std::fs::File::create(path).expect("failed to create CSV file");
+        writeln!(f, "preset,{}", CSV_HEADER).expect("failed to write CSV header");
+        for (preset_name, results) in &all_results {
+            for r in results {
+                writeln!(f, "{},{}", preset_name, r.to_csv_row()).expect("failed to write CSV row");
+            }
+        }
+        println!("CSV saved to {}", path);
+    }
 
     if selected_presets.is_empty() || policies.is_empty() {
         eprintln!("\nUsage: cargo bench -- [preset_name...] [-p policy] [-q|--quick]");

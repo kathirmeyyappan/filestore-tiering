@@ -35,7 +35,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 
 use anyhow::Result;
 use rand::Rng;
@@ -245,20 +245,27 @@ pub struct BenchResult {
     /// Bytes the daemon wrote to each storage layer during measurement.
     /// `[0]` = hot tier (promotions); `[i+1]` = cold tier i (demotions).
     pub bytes_written_to_tier: Vec<u64>,
+    /// Number of daemon poll cycles during measurement.
+    pub poll_cycles: u64,
+    /// Total time spent in `policy.ingest()` during measurement (microseconds).
+    pub ingest_us: u64,
+    /// Total time spent in `policy.reorganize()` during measurement (microseconds).
+    pub reorganize_us: u64,
 }
 
 /// CSV header matching `to_csv_row`.
 pub const CSV_HEADER: &str = "policy,warmup_ops,measure_ops,poll_interval_ops,depth,hot_cap,\
 min_file_size,max_file_size,create_pct,delete_pct,edit_pct,skew,\
 total_creates,total_deletes,total_edits,hot_edits,cold_edits,hit_rate,\
-promotions,demotions,demotions_tier0,bytes_wr_hot,bytes_wr_cold0";
+promotions,demotions,demotions_tier0,bytes_wr_hot,bytes_wr_cold0,\
+poll_cycles,ingest_us,reorganize_us";
 
 impl BenchResult {
     pub fn to_csv_row(&self) -> String {
         let bw_hot = self.bytes_written_to_tier.first().copied().unwrap_or(0);
         let bw_cold0 = self.bytes_written_to_tier.get(1).copied().unwrap_or(0);
         format!(
-            "{},{},{},{},{},{},{},{},{},{},{},{:.1},{},{},{},{},{},{:.6},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{},{},{},{:.1},{},{},{},{},{},{:.6},{},{},{},{},{},{},{},{}",
             self.config.policy,
             self.config.warmup_ops,
             self.config.measure_ops,
@@ -282,6 +289,9 @@ impl BenchResult {
             self.demotions_tier0,
             bw_hot,
             bw_cold0,
+            self.poll_cycles,
+            self.ingest_us,
+            self.reorganize_us,
         )
     }
 
@@ -428,6 +438,9 @@ pub fn run_with_trace(config: &WorkloadConfig, trace: &WorkloadTrace) -> Result<
         demotions,
         demotions_tier0,
         bytes_written_to_tier,
+        poll_cycles: phase.poll_cycles,
+        ingest_us: phase.ingest_us,
+        reorganize_us: phase.reorganize_us,
     })
 }
 
@@ -447,6 +460,9 @@ struct PhaseResult {
     deletes: u64,
     hot_edits: u64,
     cold_edits: u64,
+    poll_cycles: u64,
+    ingest_us: u64,
+    reorganize_us: u64,
 }
 
 fn replay_phase(
@@ -462,6 +478,9 @@ fn replay_phase(
     let mut deletes = 0u64;
     let mut hot_edits = 0u64;
     let mut cold_edits = 0u64;
+    let mut poll_cycles = 0u64;
+    let mut ingest_us = 0u64;
+    let mut reorganize_us = 0u64;
 
     for (i, op) in ops.iter().enumerate() {
         match op {
@@ -512,16 +531,28 @@ fn replay_phase(
 
         // Daemon poll: flush accumulated events every poll_interval_ops operations.
         if (i + 1) % config.poll_interval_ops == 0 {
+            let t0 = Instant::now();
             policy.ingest(&events);
+            let t1 = Instant::now();
             policy.reorganize().map_err(|e| anyhow::anyhow!("{}", e))?;
+            let t2 = Instant::now();
+            ingest_us += (t1 - t0).as_micros() as u64;
+            reorganize_us += (t2 - t1).as_micros() as u64;
+            poll_cycles += 1;
             events.clear();
         }
     }
 
     // Final flush for any remaining events.
     if !events.is_empty() {
+        let t0 = Instant::now();
         policy.ingest(&events);
+        let t1 = Instant::now();
         policy.reorganize().map_err(|e| anyhow::anyhow!("{}", e))?;
+        let t2 = Instant::now();
+        ingest_us += (t1 - t0).as_micros() as u64;
+        reorganize_us += (t2 - t1).as_micros() as u64;
+        poll_cycles += 1;
     }
 
     Ok(PhaseResult {
@@ -529,6 +560,9 @@ fn replay_phase(
         deletes,
         hot_edits,
         cold_edits,
+        poll_cycles,
+        ingest_us,
+        reorganize_us,
     })
 }
 
