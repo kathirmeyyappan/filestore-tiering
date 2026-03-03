@@ -10,7 +10,9 @@ use filestore_tiering::bench::{CSV_HEADER, WorkloadConfig, run};
 use filestore_tiering::capacity::parse_capacity;
 
 #[derive(Parser)]
-#[command(about = "Tiering benchmark: hit rate, promotion/demotion counts, and bytes written per tier")]
+#[command(
+    about = "Tiering benchmark: hit rate, promotion/demotion counts, and bytes written per tier"
+)]
 struct Cli {
     #[arg(long, default_value = "basic_lru")]
     policy: String,

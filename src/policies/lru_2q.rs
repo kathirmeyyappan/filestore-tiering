@@ -278,10 +278,8 @@ impl PolicyEngine for Lru2QPolicy {
                     {
                         // Keep a1_in_bytes in sync when a hot file changes size.
                         if self.in_a1in.contains(&path) {
-                            self.a1_in_bytes = self
-                                .a1_in_bytes
-                                .saturating_sub(old)
-                                .saturating_add(new);
+                            self.a1_in_bytes =
+                                self.a1_in_bytes.saturating_sub(old).saturating_add(new);
                         }
                         self.tier_state.adjust_hot_bytes(old, new);
                         self.hot_sizes.insert(path.clone(), new);
@@ -597,8 +595,12 @@ mod tests {
         let cold_root = fs::canonicalize(cold_dir.path()).unwrap();
         fs::write(hot_root.join("f1"), b"tenbytes!!").unwrap();
         fs::write(hot_root.join("f2"), b"tenbytes!!").unwrap();
-        let mut tier_state =
-            TierState::new(hot_root.clone(), vec![cold_root.clone()], 15, vec![u64::MAX]);
+        let mut tier_state = TierState::new(
+            hot_root.clone(),
+            vec![cold_root.clone()],
+            15,
+            vec![u64::MAX],
+        );
         tier_state.init_bytes().unwrap();
         let mut policy = Lru2QPolicy::new(tier_state);
         policy.reorganize().unwrap();
@@ -623,8 +625,12 @@ mod tests {
         let cold_root = fs::canonicalize(cold_dir.path()).unwrap();
         fs::write(hot_root.join("f1"), b"tenbytes!!").unwrap();
         fs::write(hot_root.join("f2"), b"tenbytes!!").unwrap();
-        let mut tier_state =
-            TierState::new(hot_root.clone(), vec![cold_root.clone()], 15, vec![u64::MAX]);
+        let mut tier_state = TierState::new(
+            hot_root.clone(),
+            vec![cold_root.clone()],
+            15,
+            vec![u64::MAX],
+        );
         tier_state.init_bytes().unwrap();
         let mut policy = Lru2QPolicy::new(tier_state);
         policy.reorganize().unwrap();
@@ -648,8 +654,12 @@ mod tests {
         for name in ["a", "b", "c"] {
             fs::write(hot_root.join(name), b"tenbytes!!").unwrap();
         }
-        let mut tier_state =
-            TierState::new(hot_root.clone(), vec![cold_root.clone()], 15, vec![u64::MAX]);
+        let mut tier_state = TierState::new(
+            hot_root.clone(),
+            vec![cold_root.clone()],
+            15,
+            vec![u64::MAX],
+        );
         tier_state.init_bytes().unwrap();
         let mut policy = Lru2QPolicy::new(tier_state);
         policy.reorganize().unwrap();

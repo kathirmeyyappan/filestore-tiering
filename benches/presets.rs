@@ -223,5 +223,8 @@ fn main() {
     }
 
     println!();
-    println!("Total elapsed: {:.1}s", overall_start.elapsed().as_secs_f64());
+    println!(
+        "Total elapsed: {:.1}s",
+        overall_start.elapsed().as_secs_f64()
+    );
 }

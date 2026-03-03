@@ -120,14 +120,20 @@ pub fn generate_trace<R: Rng>(config: &WorkloadConfig, rng: &mut R) -> WorkloadT
             OpType::Edit => {
                 let idx = skewed_index(live_count, config.skew, rng);
                 let size = rng.gen_range(config.min_file_size..=config.max_file_size);
-                WorkloadOp::Edit { live_idx: idx, size }
+                WorkloadOp::Edit {
+                    live_idx: idx,
+                    size,
+                }
             }
         };
         ops.push(op);
     }
 
     let measure = ops.split_off(config.warmup_ops as usize);
-    WorkloadTrace { warmup: ops, measure }
+    WorkloadTrace {
+        warmup: ops,
+        measure,
+    }
 }
 
 // ── Results ────────────────────────────────────────────────────────────────────
@@ -280,10 +286,24 @@ pub fn run_with_trace(config: &WorkloadConfig, trace: &WorkloadTrace) -> Result<
     let now = SystemTime::now();
     let mut live: Vec<PathBuf> = Vec::new();
 
-    replay_phase(config, &hot_path, &trace.warmup, &mut *policy, &mut live, now)?;
+    replay_phase(
+        config,
+        &hot_path,
+        &trace.warmup,
+        &mut *policy,
+        &mut live,
+        now,
+    )?;
     let stats_pre = policy.stats();
 
-    let phase = replay_phase(config, &hot_path, &trace.measure, &mut *policy, &mut live, now)?;
+    let phase = replay_phase(
+        config,
+        &hot_path,
+        &trace.measure,
+        &mut *policy,
+        &mut live,
+        now,
+    )?;
     let stats_post = policy.stats();
 
     let promotions = stats_post.promotions.saturating_sub(stats_pre.promotions);
@@ -298,7 +318,11 @@ pub fn run_with_trace(config: &WorkloadConfig, trace: &WorkloadTrace) -> Result<
         .max(stats_pre.bytes_written_to_tier.len());
     let bytes_written_to_tier: Vec<u64> = (0..n)
         .map(|i| {
-            let post = stats_post.bytes_written_to_tier.get(i).copied().unwrap_or(0);
+            let post = stats_post
+                .bytes_written_to_tier
+                .get(i)
+                .copied()
+                .unwrap_or(0);
             let pre = stats_pre.bytes_written_to_tier.get(i).copied().unwrap_or(0);
             post.saturating_sub(pre)
         })
@@ -365,15 +389,27 @@ fn replay_phase(
                 let path = make_nested_path(hot_path, config.depth, *file_id);
                 create_file(&path, *size)?;
                 live.push(path.clone());
-                events.push(AccessEvent { path: path.clone(), kind: FsEventKind::Create, timestamp: now });
-                events.push(AccessEvent { path, kind: FsEventKind::Modify, timestamp: now });
+                events.push(AccessEvent {
+                    path: path.clone(),
+                    kind: FsEventKind::Create,
+                    timestamp: now,
+                });
+                events.push(AccessEvent {
+                    path,
+                    kind: FsEventKind::Modify,
+                    timestamp: now,
+                });
             }
             WorkloadOp::Delete { live_idx } => {
                 deletes += 1;
                 // live_idx is always valid (generated against the same simulated live count)
                 let path = live.remove(*live_idx);
                 fs::remove_file(&path).ok();
-                events.push(AccessEvent { path, kind: FsEventKind::Remove, timestamp: now });
+                events.push(AccessEvent {
+                    path,
+                    kind: FsEventKind::Remove,
+                    timestamp: now,
+                });
             }
             WorkloadOp::Edit { live_idx, size } => {
                 let path = &live[*live_idx];
@@ -407,10 +443,19 @@ fn replay_phase(
         policy.reorganize().map_err(|e| anyhow::anyhow!("{}", e))?;
     }
 
-    Ok(PhaseResult { creates, deletes, hot_edits, cold_edits })
+    Ok(PhaseResult {
+        creates,
+        deletes,
+        hot_edits,
+        cold_edits,
+    })
 }
 
-enum OpType { Create, Delete, Edit }
+enum OpType {
+    Create,
+    Delete,
+    Edit,
+}
 
 fn choose_op_type<R: Rng>(config: &WorkloadConfig, live_count: usize, rng: &mut R) -> OpType {
     if live_count == 0 {
@@ -424,12 +469,20 @@ fn choose_op_type<R: Rng>(config: &WorkloadConfig, live_count: usize, rng: &mut 
         return OpType::Create;
     }
     let x = rng.gen_range(0..total);
-    if x < c { OpType::Create } else if x < c + d { OpType::Delete } else { OpType::Edit }
+    if x < c {
+        OpType::Create
+    } else if x < c + d {
+        OpType::Delete
+    } else {
+        OpType::Edit
+    }
 }
 
 fn make_nested_path(root: &Path, depth: usize, file_id: usize) -> PathBuf {
     let mut p = root.to_path_buf();
-    for i in 0..depth { p.push(format!("dir_{}", i)); }
+    for i in 0..depth {
+        p.push(format!("dir_{}", i));
+    }
     fs::create_dir_all(&p).ok();
     p.push(format!("f_{}.dat", file_id));
     p
@@ -443,7 +496,9 @@ fn skewed_index<R: Rng>(len: usize, skew: f64, rng: &mut R) -> usize {
 }
 
 fn create_file(path: &Path, size: usize) -> Result<()> {
-    if let Some(parent) = path.parent() { fs::create_dir_all(parent)?; }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
     fs::write(path, vec![b'x'; size])?;
     Ok(())
 }
