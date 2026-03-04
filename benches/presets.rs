@@ -57,6 +57,7 @@ fn base_config() -> WorkloadConfig {
         edit_pct: 85,
         skew: 1.0,
         phases: vec![],
+        policy_params: std::collections::HashMap::new(),
     }
 }
 
@@ -266,9 +267,15 @@ fn presets() -> Vec<Preset> {
     ]
 }
 
-fn run_preset(preset: &Preset, policies: &[&str], quick: bool) -> Vec<BenchResult> {
+fn run_preset(
+    preset: &Preset,
+    policies: &[&str],
+    quick: bool,
+    policy_params: &std::collections::HashMap<String, f64>,
+) -> Vec<BenchResult> {
     let mut cfg = base_config();
     (preset.apply)(&mut cfg);
+    cfg.policy_params = policy_params.clone();
 
     if quick {
         cfg.warmup_ops = (cfg.warmup_ops / 5).max(100);
@@ -341,6 +348,7 @@ fn main() {
     let quick = args.iter().any(|a| a == "--quick" || a == "-q");
     let mut preset_filters: Vec<String> = Vec::new();
     let mut policy_filters: Vec<String> = Vec::new();
+    let mut policy_param_strs: Vec<String> = Vec::new();
     let mut csv_path: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
@@ -350,6 +358,14 @@ fn main() {
                 i += 1;
                 if i < args.len() {
                     policy_filters.push(args[i].clone());
+                }
+            }
+            "--policy-param" => {
+                i += 1;
+                if i < args.len() {
+                    // Accumulated; applied to every policy. Format: key=value
+                    // Parsed later once we have the config.
+                    policy_param_strs.push(args[i].clone());
                 }
             }
             "--csv" => {
@@ -365,6 +381,24 @@ fn main() {
             _ => eprintln!("Unknown flag: {}", args[i]),
         }
         i += 1;
+    }
+
+    // Parse --policy-param key=value pairs.
+    let mut policy_params = std::collections::HashMap::new();
+    for s in &policy_param_strs {
+        if let Some((k, v)) = s.split_once('=') {
+            match v.parse::<f64>() {
+                Ok(val) => {
+                    policy_params.insert(k.to_string(), val);
+                }
+                Err(_) => eprintln!("Warning: ignoring invalid policy-param value: {}", s),
+            }
+        } else {
+            eprintln!(
+                "Warning: ignoring malformed policy-param (expected key=value): {}",
+                s
+            );
+        }
     }
 
     let all_presets = presets();
@@ -412,7 +446,7 @@ fn main() {
     let mut all_results: Vec<(&str, Vec<BenchResult>)> = Vec::new();
     for preset in &selected_presets {
         eprintln!("  [preset: {}]", preset.name);
-        let results = run_preset(preset, &policies, quick);
+        let results = run_preset(preset, &policies, quick, &policy_params);
         print_table(preset.name, preset.description, &results);
         all_results.push((preset.name, results));
     }

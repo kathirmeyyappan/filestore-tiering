@@ -61,6 +61,10 @@ struct Cli {
     #[arg(long)]
     header: bool,
 
+    /// Per-policy tunable parameter (repeatable). Format: key=value.
+    #[arg(long = "policy-param", num_args = 1)]
+    policy_params: Vec<String>,
+
     /// Output a single CSV row (for scripting). Default is human-readable.
     #[arg(long)]
     csv: bool,
@@ -72,6 +76,18 @@ fn main() -> Result<()> {
     if cli.header {
         println!("{}", CSV_HEADER);
         return Ok(());
+    }
+
+    let mut policy_params = std::collections::HashMap::new();
+    for s in &cli.policy_params {
+        if let Some((k, v)) = s.split_once('=') {
+            let val: f64 = v
+                .parse()
+                .map_err(|_| anyhow::anyhow!("invalid policy-param value: {}", s))?;
+            policy_params.insert(k.to_string(), val);
+        } else {
+            anyhow::bail!("malformed policy-param (expected key=value): {}", s);
+        }
     }
 
     let config = WorkloadConfig {
@@ -88,6 +104,7 @@ fn main() -> Result<()> {
         edit_pct: cli.edit_pct,
         skew: cli.skew,
         phases: vec![],
+        policy_params,
     };
 
     let result = run(config)?;
