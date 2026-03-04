@@ -102,39 +102,61 @@ fn presets() -> Vec<Preset> {
             },
         },
         Preset {
-            // Recency-favored: high create rate floods the live list with new files.
-            // skew=0.3 → u^0.3 concentrates edits on HIGH indices (newest files) because
-            // u^0.3 > u for u in (0,1). The working set is always the most recently
-            // created files — exactly what LRU and ARC are optimised for. LFU retains
-            // old high-count files and evicts new arrivals (freq=1) immediately, so the
-            // very next edit on a just-created file is a cold miss. LRU-2Q's A1in queue
-            // holds new files briefly, so it beats LFU but trails LRU/ARC.
-            // Expected: arc ≈ basic_lru > lru_2q >> lfu.
+            // Recency-favored: a modest but steady stream of new files enters the live
+            // list, and edits are extremely concentrated on the newest files via a sharp
+            // power-law skew (u^0.05). With skew=0.05, P(u^0.05 > 0.9) = 87.8%, meaning
+            // 88% of edits land on the newest 10% of files. Smaller files (128–512 B,
+            // avg ~320 B) let hot hold ~12 slots.
+            //
+            // The critical difference this exposes:
+            //   LRU/ARC: keep the most recently accessed files hot → mostly keeps the
+            //     newest 10-12 files → high hit rate as new files arrive and get promoted.
+            //   LFU: keeps the files with the highest accumulated access counts. Older
+            //     files have counts of 50-200+; brand-new files have count=1 and are
+            //     immediately evicted. Even though new files are the most-accessed in the
+            //     skewed distribution, LFU cannot promote them because their raw count
+            //     is always less than the incumbent old files.
+            //
+            // With 8% creates, the live list grows slowly (~960 files by end of measure,
+            // avg ~560). Top 10% ≈ 56 files; hot holds 12 → 21% hot-zone coverage vs
+            // the old 1.2% (8 files in a 640-file zone). Expected: basic_lru ≈ arc >>
+            // lru_2q > lfu.
             name: "recency_favored",
-            description: "New-file storm: 40/0/60, skew=0.3 (newest), hot=4K. LFU loses.",
+            description: "Sharp recency skew: 8/0/92, skew=0.05 (newest), hot=4K, small files. LFU loses badly.",
             apply: |cfg| {
                 cfg.hot_capacity = 4_000;
-                cfg.min_file_size = 256;
-                cfg.max_file_size = 768;
-                cfg.create_pct = 40;
+                cfg.min_file_size = 128; // smaller files → more slots in the tiny hot tier
+                cfg.max_file_size = 512; // avg ~320 B → ~12 files fit in hot
+                cfg.create_pct = 8;      // slow trickle of new arrivals keeps live list manageable
                 cfg.delete_pct = 0;
-                cfg.edit_pct = 60;
-                cfg.skew = 0.3;
+                cfg.edit_pct = 92;
+                cfg.skew = 0.05;         // u^0.05: 88% of edits hit newest 10% of files
                 cfg.warmup_ops = 2_000;
                 cfg.measure_ops = 10_000;
             },
         },
         Preset {
-            // High-churn: heavy create AND delete traffic rapidly cycles the working set.
-            // No exploitable access skew. Tests how quickly each policy adapts when the
-            // active file population changes. With balanced creates/deletes the live list
-            // stabilises, but its composition changes constantly, stressing eviction logic.
+            // High-churn: heavy create + delete traffic rapidly cycles which files are
+            // alive, while a mild recency skew (u^0.35) biases edits toward newer files.
+            // This creates a working set that is real but constantly shifting.
+            //
+            // The critical difference this exposes:
+            //   LRU/ARC: naturally keep recently accessed (= newer) files hot and
+            //     immediately adapt when the composition of the live list changes.
+            //   LFU: accumulates frequency counts on files that may already be deleted.
+            //     Fresh creates enter at freq=1 and are the first to be evicted, even
+            //     when the skew makes them the most likely edit targets going forward.
+            //
+            // With skew=0.35: P(u^0.35 > 0.8) ≈ 48%, so ~half of edits land on the
+            // newest 20% of files (~70 of 350 live). Hot holds ~17 files → 24% coverage
+            // of that hot zone. Expected: basic_lru ≈ arc > lru_2q > lfu.
             name: "high_churn",
-            description: "Heavy turnover: 30/20/50, skew=1.0. Working set shifts constantly.",
+            description: "Shifting recency working set: 30/20/50, skew=0.35. LFU can't track deletions.",
             apply: |cfg| {
                 cfg.create_pct = 30;
                 cfg.delete_pct = 20;
                 cfg.edit_pct = 50;
+                cfg.skew = 0.35; // mild recency bias: new files are more likely edit targets
             },
         },
         Preset {

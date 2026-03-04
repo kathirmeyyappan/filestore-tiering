@@ -134,26 +134,27 @@ run_preset frequency_favored \
     --edit-pct       97 \
     --skew           5.0
 
-# Recency-favored: high create rate floods the live list with new files.
-# skew=0.3 concentrates edits on the newest files (high live-list indices).
-# LRU/ARC keep fresh arrivals hot; LFU evicts them immediately (freq=1).
-# Expected ordering: arc ~= basic_lru > lru_2q >> lfu.
+# Recency-favored: slow trickle of new files + extremely sharp recency skew (u^0.05).
+# 88% of edits land on the newest 10% of files. Smaller files give ~12 hot slots.
+# LRU keeps the newest files hot; LFU locks onto old high-count incumbents and
+# immediately evicts new arrivals (freq=1) — missing them on every subsequent edit.
 run_preset recency_favored \
     --warmup-ops     2000 \
     --measure-ops    10000 \
     --poll-interval-ops 50 \
     --depth          3 \
     --hot-capacity   4000 \
-    --min-file-size  256 \
-    --max-file-size  768 \
-    --create-pct     40 \
+    --min-file-size  128 \
+    --max-file-size  512 \
+    --create-pct     8 \
     --delete-pct     0 \
-    --edit-pct       60 \
-    --skew           0.3
+    --edit-pct       92 \
+    --skew           0.05
 
-# High-churn: heavy create + delete traffic rapidly cycles the working set.
-# No exploitable skew (skew=1.0). Tests how quickly each policy adapts when
-# the active file population changes constantly.
+# High-churn: heavy create+delete cycles the live list + mild recency skew (0.35).
+# ~48% of edits land on the newest 20% of files — a working set that shifts constantly.
+# LRU/ARC adapt immediately as new files arrive; LFU's accumulated counts anchor it
+# to files that may already be deleted, so it evicts new popular arrivals too soon.
 run_preset high_churn \
     --warmup-ops     1000 \
     --measure-ops    5000 \
@@ -165,7 +166,7 @@ run_preset high_churn \
     --create-pct     30 \
     --delete-pct     20 \
     --edit-pct       50 \
-    --skew           1.0
+    --skew           0.35
 
 # Hot-set: moderate skew toward older files (skew=3.0), larger hot tier.
 # Tests whether frequency-aware policies maintain an edge under a weaker signal
