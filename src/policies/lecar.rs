@@ -59,6 +59,7 @@ pub struct LeCarPolicy {
     /// Maps ghost path → logical time it was evicted (for discount calculation).
     ghost_evict_time: HashMap<PathBuf, u64>,
     ghost_cap: usize,
+    ghost_cap_min: usize,
 
     // ── Learned weights ──
     w_lru: f64,
@@ -81,7 +82,7 @@ impl LeCarPolicy {
     pub fn new_with_params(tier_state: TierState, params: &HashMap<String, f64>) -> Self {
         let learning_rate = params.get("learning_rate").copied().unwrap_or(0.45);
         let w_lru = params.get("w_lru").copied().unwrap_or(0.5);
-        // ghost_cap defaults to 16; recalculated on first fill when we know file count.
+        let ghost_cap_min = params.get("ghost_cap_min").copied().unwrap_or(32.0) as usize;
         Self {
             tier_state,
             hot_sizes: HashMap::new(),
@@ -95,7 +96,8 @@ impl LeCarPolicy {
             lru_ghost: VecDeque::new(),
             lfu_ghost: VecDeque::new(),
             ghost_evict_time: HashMap::new(),
-            ghost_cap: 16,
+            ghost_cap: ghost_cap_min,
+            ghost_cap_min,
             w_lru,
             learning_rate,
             discount_rate: 0.5, // recomputed on first fill
@@ -183,7 +185,7 @@ impl LeCarPolicy {
     /// Recalculate ghost_cap and discount_rate based on current hot file count.
     fn recalc_params(&mut self) {
         let c = self.hot_sizes.len().max(1);
-        self.ghost_cap = c;
+        self.ghost_cap = (2 * c).max(self.ghost_cap_min);
         // discount_rate = 0.005^(1/c)
         self.discount_rate = 0.005_f64.powf(1.0 / c as f64);
     }

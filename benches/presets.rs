@@ -43,15 +43,17 @@ const POLICIES: &[&str] = &[
 fn base_config() -> WorkloadConfig {
     WorkloadConfig {
         policy: String::new(),
-        warmup_ops: 1_000,
-        measure_ops: 5_000,
+        warmup_ops: 3_000,
+        measure_ops: 20_000,
         poll_interval_ops: 50,
         depth: 3,
-        // ~17 files fit in hot at average file size (1152 B avg of [256, 2048]).
-        // Live list grows to ~300+ files over the full run, creating real eviction pressure.
-        hot_capacity: 20_000,
+        // ~100 files fit in hot at average file size (512 B avg of [256, 768]).
+        // Live list grows to 500+ files over the full run (~15% cache ratio),
+        // giving policies enough items for meaningful internal structure
+        // (probation/protected splits, ghost lists, ARC T1/T2 adaptation).
+        hot_capacity: 50_000,
         min_file_size: 256,
-        max_file_size: 2_048,
+        max_file_size: 768,
         create_pct: 10,
         delete_pct: 5,
         edit_pct: 85,
@@ -80,25 +82,21 @@ fn presets() -> Vec<Preset> {
             apply: |_cfg| {},
         },
         Preset {
-            // Frequency-favored: near-zero file creation, edits concentrated on a tiny
-            // stable subset of old files (skew=5.0). Hot tier holds only ~8 files (4K / 512 B avg).
-            // LFU keeps the same 8 files in hot permanently — their access counts far
+            // Frequency-favored: near-zero file creation, edits concentrated on a stable
+            // subset of old files (skew=5.0). Hot tier holds ~80 files (40K / ~512 B avg).
+            // LFU keeps the popular files in hot permanently — their access counts far
             // outweigh any new arrival. LRU can displace one when a rare create pushes
             // something to MRU, then must re-promote it on the next access. LRU-2Q's Am
             // queue also protects multi-access files. ARC's ghost lists help it partially
             // recover. Result: clear ordering lfu ≥ lru_2q > arc > basic_lru.
             name: "frequency_favored",
-            description: "Stable hot set: 3/0/97, skew=5.0, hot=4K. LFU wins.",
+            description: "Stable hot set: 3/0/97, skew=5.0, hot=40K (~80 files). LFU wins.",
             apply: |cfg| {
-                cfg.hot_capacity = 4_000;
-                cfg.min_file_size = 256;
-                cfg.max_file_size = 768; // tight tier: avg ~512 B → ~8 files fit
+                cfg.hot_capacity = 40_000;
                 cfg.create_pct = 3;
                 cfg.delete_pct = 0;
                 cfg.edit_pct = 97;
                 cfg.skew = 5.0;
-                cfg.warmup_ops = 2_000;
-                cfg.measure_ops = 10_000;
             },
         },
         Preset {
@@ -111,17 +109,13 @@ fn presets() -> Vec<Preset> {
             // holds new files briefly, so it beats LFU but trails LRU/ARC.
             // Expected: arc ≈ basic_lru > lru_2q >> lfu.
             name: "recency_favored",
-            description: "New-file storm: 40/0/60, skew=0.3 (newest), hot=4K. LFU loses.",
+            description: "New-file storm: 40/0/60, skew=0.3 (newest), hot=40K. LFU loses.",
             apply: |cfg| {
-                cfg.hot_capacity = 4_000;
-                cfg.min_file_size = 256;
-                cfg.max_file_size = 768;
+                cfg.hot_capacity = 40_000;
                 cfg.create_pct = 40;
                 cfg.delete_pct = 0;
                 cfg.edit_pct = 60;
                 cfg.skew = 0.3;
-                cfg.warmup_ops = 2_000;
-                cfg.measure_ops = 10_000;
             },
         },
         Preset {
@@ -151,40 +145,34 @@ fn presets() -> Vec<Preset> {
         },
         Preset {
             // Scan resistance exploit for LRU-2Q. Heavy create rate (30%) floods the
-            // live list with one-time files while edits concentrate on a tiny stable core
-            // (skew=3.0). LRU-2Q's A1in FIFO (25% = ~2 files) absorbs the entire scan
-            // without touching Am, which holds the ~6-file core untouched. ARC's adaptive
-            // p can oscillate: occasional B1 ghost hits from scan files that happen to get
-            // one re-edit push p upward (enlarging T1 — counterproductive since scan files
-            // don't deserve hot space), then B2 ghost hits correct downward. This oscillation
-            // costs ARC a few misses each cycle. Basic LRU gets catastrophically thrashed —
-            // every new file enters as MRU, evicting a core file from the LRU tail; the next
-            // edit on that core file is a guaranteed cold miss. LFU also handles this well
-            // (frequency counts protect the core), but LRU-2Q's zero-learning-period fixed
-            // split gives it a slight edge during warmup and transitions.
+            // live list with one-time files while edits concentrate on a stable core
+            // (skew=3.0). Hot tier holds ~80 files (40K). LRU-2Q's A1in FIFO (25% = ~20
+            // files) absorbs scans without touching Am, which holds the core untouched.
+            // ARC's adaptive p can oscillate: occasional B1 ghost hits from scan files
+            // push p upward (counterproductive), then B2 ghost hits correct downward.
+            // Basic LRU gets thrashed — every new file enters as MRU, evicting a core
+            // file from the LRU tail. LFU also handles this well (frequency counts
+            // protect the core), but LRU-2Q's zero-learning-period fixed split gives
+            // it an edge.
             // Expected: lru_2q ≈ lfu > arc >> basic_lru.
             name: "scan_flood",
-            description: "Scan noise + stable core: 30/5/65, skew=3.0, hot=4K. LRU-2Q's A1in shines.",
+            description: "Scan noise + stable core: 30/5/65, skew=3.0, hot=40K. LRU-2Q's A1in shines.",
             apply: |cfg| {
-                cfg.hot_capacity = 4_000;
-                cfg.min_file_size = 256;
-                cfg.max_file_size = 768;
+                cfg.hot_capacity = 40_000;
                 cfg.create_pct = 30;
                 cfg.delete_pct = 5;
                 cfg.edit_pct = 65;
                 cfg.skew = 3.0;
-                cfg.warmup_ops = 2_000;
-                cfg.measure_ops = 10_000;
             },
         },
         Preset {
             // Aggressive scan resistance for LRU-2Q. Same concept as scan_flood but more
-            // extreme: higher create rate (35%) with very strong frequency skew (4.0) and
-            // the tightest possible tier (2.5K ≈ 5 files). The massive create rate generates
-            // a firehose of one-time files that never get re-accessed (skew=4.0 sends edits
-            // to the oldest ~5 files exclusively). LRU-2Q's A1in (25% = ~625B ≈ 1 file)
-            // absorbs one scan file at a time via FIFO while Am's 4 protected slots hold
-            // the entire hot core. Every other policy struggles:
+            // extreme: higher create rate (35%) with very strong frequency skew (4.0).
+            // Hot tier holds ~50 files (25K). The massive create rate generates a firehose
+            // of one-time files that never get re-accessed (skew=4.0 sends edits to the
+            // oldest files exclusively). LRU-2Q's A1in (25% = ~12 files) absorbs scan
+            // files via FIFO while Am holds the core untouched. Every other policy
+            // struggles:
             //
             // Basic LRU: every new file pushes a core file off the LRU tail — catastrophic.
             // ARC: p starts at 0 and needs time to learn; the massive create rate floods T1
@@ -193,17 +181,13 @@ fn presets() -> Vec<Preset> {
             // during initial convergence. LRU-2Q wins from the very first poll.
             // Expected: lru_2q > lfu >> arc > basic_lru.
             name: "scan_heavy",
-            description: "Extreme scan: 35/5/60, skew=4.0, hot=2.5K. A1in vs the firehose.",
+            description: "Extreme scan: 35/5/60, skew=4.0, hot=25K. A1in vs the firehose.",
             apply: |cfg| {
-                cfg.hot_capacity = 2_500;
-                cfg.min_file_size = 256;
-                cfg.max_file_size = 768;
+                cfg.hot_capacity = 25_000;
                 cfg.create_pct = 35;
                 cfg.delete_pct = 5;
                 cfg.edit_pct = 60;
                 cfg.skew = 4.0;
-                cfg.warmup_ops = 2_000;
-                cfg.measure_ops = 10_000;
             },
         },
         Preset {
@@ -227,11 +211,6 @@ fn presets() -> Vec<Preset> {
             name: "phase_shift",
             description: "Cycling freq↔recency (skew 4.0↔0.3). ARC adapts p each transition.",
             apply: |cfg| {
-                cfg.hot_capacity = 20_000;
-                cfg.min_file_size = 256;
-                cfg.max_file_size = 768; // avg ~512 B → ~40 files fit, p granularity ~2.5%
-                cfg.warmup_ops = 3_000;
-                cfg.measure_ops = 10_000;
                 cfg.phases = vec![
                     WorkloadPhase {
                         fraction: 0.25,

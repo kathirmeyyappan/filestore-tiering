@@ -68,6 +68,7 @@ pub struct CacheusPolicy {
     lfu_ghost: VecDeque<PathBuf>,
     ghost_evict_time: HashMap<PathBuf, u64>,
     ghost_cap: usize,
+    ghost_cap_min: usize,
 
     // ── Weights ──
     w_sr_lru: f64,
@@ -90,6 +91,7 @@ impl CacheusPolicy {
     pub fn new_with_params(tier_state: TierState, params: &HashMap<String, f64>) -> Self {
         let lr_init = params.get("lr_init").copied().unwrap_or(0.45);
         let w_sr_lru = params.get("w_sr_lru").copied().unwrap_or(0.5);
+        let ghost_cap_min = params.get("ghost_cap_min").copied().unwrap_or(32.0) as usize;
         Self {
             tier_state,
             hot_sizes: HashMap::new(),
@@ -105,7 +107,8 @@ impl CacheusPolicy {
             lru_ghost: VecDeque::new(),
             lfu_ghost: VecDeque::new(),
             ghost_evict_time: HashMap::new(),
-            ghost_cap: 16,
+            ghost_cap: ghost_cap_min,
+            ghost_cap_min,
             w_sr_lru,
             lr_init,
             discount_rate: 0.5,
@@ -210,7 +213,7 @@ impl CacheusPolicy {
 
     fn recalc_params(&mut self) {
         let c = self.hot_sizes.len().max(1);
-        self.ghost_cap = c;
+        self.ghost_cap = (2 * c).max(self.ghost_cap_min);
         self.discount_rate = 0.005_f64.powf(1.0 / c as f64);
         self.decay_factor = (-1.0 / c as f64).exp();
     }
