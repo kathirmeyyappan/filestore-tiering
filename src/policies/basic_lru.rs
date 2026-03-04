@@ -439,7 +439,6 @@ mod tests {
     /// "Touch via hot" = ingest an event with path = hot path; "touch via cold" = ingest an
     /// event with path = cold path (what the watcher reports when the user edits via the
     /// hot symlink). The policy only sees paths and kinds; it maps cold→hot and promotes.
-
     fn setup_dirs() -> (tempfile::TempDir, tempfile::TempDir) {
         (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap())
     }

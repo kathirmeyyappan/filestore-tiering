@@ -2,6 +2,7 @@
 //!
 //! Used by the main binary (watch loop) and by the benchmark to build a policy instance.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use anyhow::Result;
@@ -26,6 +27,7 @@ pub fn make_policy(
     cold_storage: &[PathBuf],
     hot_capacity: u64,
     cold_capacities: Vec<u64>,
+    policy_params: &HashMap<String, f64>,
 ) -> Result<Box<dyn PolicyEngine>> {
     let to_err = |e: Box<dyn std::error::Error + Send + Sync>| anyhow::anyhow!("{}", e);
     let hot_root = std::fs::canonicalize(hot_storage).map_err(|e| to_err(e.into()))?;
@@ -53,9 +55,9 @@ pub fn make_policy(
         "lecar" => {
             crate::policies::lecar::LeCarPolicy::validate_config(hot_storage, cold_storage)
                 .map_err(to_err)?;
-            Ok(Box::new(crate::policies::lecar::LeCarPolicy::new(
-                tier_state,
-            )))
+            Ok(Box::new(
+                crate::policies::lecar::LeCarPolicy::new_with_params(tier_state, policy_params),
+            ))
         }
         "lfu" => {
             crate::policies::lfu::LfuPolicy::validate_config(hot_storage, cold_storage)
@@ -65,16 +67,16 @@ pub fn make_policy(
         "lru_2q" => {
             crate::policies::lru_2q::Lru2QPolicy::validate_config(hot_storage, cold_storage)
                 .map_err(to_err)?;
-            Ok(Box::new(crate::policies::lru_2q::Lru2QPolicy::new(
-                tier_state,
-            )))
+            Ok(Box::new(
+                crate::policies::lru_2q::Lru2QPolicy::new_with_params(tier_state, policy_params),
+            ))
         }
         "cacheus" => {
             crate::policies::cacheus::CacheusPolicy::validate_config(hot_storage, cold_storage)
                 .map_err(to_err)?;
-            Ok(Box::new(crate::policies::cacheus::CacheusPolicy::new(
-                tier_state,
-            )))
+            Ok(Box::new(
+                crate::policies::cacheus::CacheusPolicy::new_with_params(tier_state, policy_params),
+            ))
         }
         "decision_tree" => {
             crate::policies::decision_tree::DecisionTreePolicy::validate_config(
@@ -83,7 +85,10 @@ pub fn make_policy(
             )
             .map_err(to_err)?;
             Ok(Box::new(
-                crate::policies::decision_tree::DecisionTreePolicy::new(tier_state),
+                crate::policies::decision_tree::DecisionTreePolicy::new_with_params(
+                    tier_state,
+                    policy_params,
+                ),
             ))
         }
         "dummy" => {

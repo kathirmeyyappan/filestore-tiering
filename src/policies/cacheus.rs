@@ -84,6 +84,12 @@ pub struct CacheusPolicy {
 
 impl CacheusPolicy {
     pub fn new(tier_state: TierState) -> Self {
+        Self::new_with_params(tier_state, &HashMap::new())
+    }
+
+    pub fn new_with_params(tier_state: TierState, params: &HashMap<String, f64>) -> Self {
+        let lr_init = params.get("lr_init").copied().unwrap_or(0.45);
+        let w_sr_lru = params.get("w_sr_lru").copied().unwrap_or(0.5);
         Self {
             tier_state,
             hot_sizes: HashMap::new(),
@@ -100,8 +106,8 @@ impl CacheusPolicy {
             lfu_ghost: VecDeque::new(),
             ghost_evict_time: HashMap::new(),
             ghost_cap: 16,
-            w_sr_lru: 0.5,
-            lr_init: 0.45,
+            w_sr_lru,
+            lr_init,
             discount_rate: 0.5,
             logical_time: 0,
             rng: StdRng::seed_from_u64(0xCAFE),

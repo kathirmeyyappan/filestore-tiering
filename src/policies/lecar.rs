@@ -75,6 +75,12 @@ pub struct LeCarPolicy {
 
 impl LeCarPolicy {
     pub fn new(tier_state: TierState) -> Self {
+        Self::new_with_params(tier_state, &HashMap::new())
+    }
+
+    pub fn new_with_params(tier_state: TierState, params: &HashMap<String, f64>) -> Self {
+        let learning_rate = params.get("learning_rate").copied().unwrap_or(0.45);
+        let w_lru = params.get("w_lru").copied().unwrap_or(0.5);
         // ghost_cap defaults to 16; recalculated on first fill when we know file count.
         Self {
             tier_state,
@@ -90,8 +96,8 @@ impl LeCarPolicy {
             lfu_ghost: VecDeque::new(),
             ghost_evict_time: HashMap::new(),
             ghost_cap: 16,
-            w_lru: 0.5,
-            learning_rate: 0.45,
+            w_lru,
+            learning_rate,
             discount_rate: 0.5, // recomputed on first fill
             logical_time: 0,
             rng: StdRng::seed_from_u64(0xCAFE),
