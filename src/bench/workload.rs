@@ -35,7 +35,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 
 use anyhow::Result;
 use rand::Rng;
@@ -68,6 +68,25 @@ pub struct WorkloadConfig {
     /// index in the live list); <1 = concentrated on newest files (high index).
     /// Sampled as floor(len * u^skew), u ~ Uniform[0,1).
     pub skew: f64,
+    /// Optional phases for the measurement window. When non-empty, parameters
+    /// (skew, create/delete/edit pct) switch at phase boundaries. The warmup
+    /// always uses the first phase's parameters. Phase fractions are normalized
+    /// so they sum to 1.0. When empty, the top-level parameters are used
+    /// throughout (single-phase backward-compatible behavior).
+    pub phases: Vec<WorkloadPhase>,
+}
+
+/// A phase within a multi-phase workload trace. Overrides the per-op
+/// parameters (skew, create/delete/edit ratios) for a fraction of the
+/// measurement window.
+#[derive(Debug, Clone)]
+pub struct WorkloadPhase {
+    /// Fraction of measure_ops this phase occupies (will be normalized).
+    pub fraction: f64,
+    pub skew: f64,
+    pub create_pct: u8,
+    pub delete_pct: u8,
+    pub edit_pct: u8,
 }
 
 // ── Trace ──────────────────────────────────────────────────────────────────────
@@ -103,8 +122,24 @@ pub fn generate_trace<R: Rng>(config: &WorkloadConfig, rng: &mut R) -> WorkloadT
     let mut live_count = 0usize;
     let mut file_counter = 0usize;
 
-    for _ in 0..total {
-        let op = match choose_op_type(config, live_count, rng) {
+    // Build phase list with cumulative boundaries for the measurement window.
+    // Warmup (ops 0..warmup_ops) always uses phase 0 params.
+    // Measurement (ops warmup_ops..total) is split across phases.
+    let phases = build_phases(config);
+    let measure_start = config.warmup_ops as usize;
+
+    for i in 0..total {
+        let active = if i < measure_start {
+            &phases[0]
+        } else {
+            let mi = i - measure_start;
+            phases
+                .iter()
+                .find(|p| mi < p.measure_end)
+                .unwrap_or(phases.last().unwrap())
+        };
+
+        let op = match choose_op_type_params(active, live_count, rng) {
             OpType::Create => {
                 let size = rng.gen_range(config.min_file_size..=config.max_file_size);
                 let id = file_counter;
@@ -118,7 +153,7 @@ pub fn generate_trace<R: Rng>(config: &WorkloadConfig, rng: &mut R) -> WorkloadT
                 WorkloadOp::Delete { live_idx: idx }
             }
             OpType::Edit => {
-                let idx = skewed_index(live_count, config.skew, rng);
+                let idx = skewed_index(live_count, active.skew, rng);
                 let size = rng.gen_range(config.min_file_size..=config.max_file_size);
                 WorkloadOp::Edit {
                     live_idx: idx,
@@ -134,6 +169,52 @@ pub fn generate_trace<R: Rng>(config: &WorkloadConfig, rng: &mut R) -> WorkloadT
         warmup: ops,
         measure,
     }
+}
+
+/// Flattened per-phase parameters used during trace generation.
+struct PhaseParams {
+    skew: f64,
+    create_pct: u8,
+    delete_pct: u8,
+    edit_pct: u8,
+    /// Cumulative end index within the measurement window (exclusive).
+    measure_end: usize,
+}
+
+/// Build phase parameter list with cumulative boundaries from config.
+fn build_phases(config: &WorkloadConfig) -> Vec<PhaseParams> {
+    if config.phases.is_empty() {
+        return vec![PhaseParams {
+            skew: config.skew,
+            create_pct: config.create_pct,
+            delete_pct: config.delete_pct,
+            edit_pct: config.edit_pct,
+            measure_end: config.measure_ops as usize,
+        }];
+    }
+    let total_frac: f64 = config.phases.iter().map(|p| p.fraction).sum();
+    let measure = config.measure_ops as usize;
+    let mut cumulative = 0usize;
+    config
+        .phases
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            let end = if i == config.phases.len() - 1 {
+                measure
+            } else {
+                cumulative += ((p.fraction / total_frac) * measure as f64) as usize;
+                cumulative
+            };
+            PhaseParams {
+                skew: p.skew,
+                create_pct: p.create_pct,
+                delete_pct: p.delete_pct,
+                edit_pct: p.edit_pct,
+                measure_end: end,
+            }
+        })
+        .collect()
 }
 
 // ── Results ────────────────────────────────────────────────────────────────────
@@ -164,20 +245,27 @@ pub struct BenchResult {
     /// Bytes the daemon wrote to each storage layer during measurement.
     /// `[0]` = hot tier (promotions); `[i+1]` = cold tier i (demotions).
     pub bytes_written_to_tier: Vec<u64>,
+    /// Number of daemon poll cycles during measurement.
+    pub poll_cycles: u64,
+    /// Total time spent in `policy.ingest()` during measurement (microseconds).
+    pub ingest_us: u64,
+    /// Total time spent in `policy.reorganize()` during measurement (microseconds).
+    pub reorganize_us: u64,
 }
 
 /// CSV header matching `to_csv_row`.
 pub const CSV_HEADER: &str = "policy,warmup_ops,measure_ops,poll_interval_ops,depth,hot_cap,\
 min_file_size,max_file_size,create_pct,delete_pct,edit_pct,skew,\
 total_creates,total_deletes,total_edits,hot_edits,cold_edits,hit_rate,\
-promotions,demotions,demotions_tier0,bytes_wr_hot,bytes_wr_cold0";
+promotions,demotions,demotions_tier0,bytes_wr_hot,bytes_wr_cold0,\
+poll_cycles,ingest_us,reorganize_us";
 
 impl BenchResult {
     pub fn to_csv_row(&self) -> String {
         let bw_hot = self.bytes_written_to_tier.first().copied().unwrap_or(0);
         let bw_cold0 = self.bytes_written_to_tier.get(1).copied().unwrap_or(0);
         format!(
-            "{},{},{},{},{},{},{},{},{},{},{},{:.1},{},{},{},{},{},{:.6},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{},{},{},{:.1},{},{},{},{},{},{:.6},{},{},{},{},{},{},{},{}",
             self.config.policy,
             self.config.warmup_ops,
             self.config.measure_ops,
@@ -201,6 +289,9 @@ impl BenchResult {
             self.demotions_tier0,
             bw_hot,
             bw_cold0,
+            self.poll_cycles,
+            self.ingest_us,
+            self.reorganize_us,
         )
     }
 
@@ -347,6 +438,9 @@ pub fn run_with_trace(config: &WorkloadConfig, trace: &WorkloadTrace) -> Result<
         demotions,
         demotions_tier0,
         bytes_written_to_tier,
+        poll_cycles: phase.poll_cycles,
+        ingest_us: phase.ingest_us,
+        reorganize_us: phase.reorganize_us,
     })
 }
 
@@ -366,6 +460,9 @@ struct PhaseResult {
     deletes: u64,
     hot_edits: u64,
     cold_edits: u64,
+    poll_cycles: u64,
+    ingest_us: u64,
+    reorganize_us: u64,
 }
 
 fn replay_phase(
@@ -381,6 +478,9 @@ fn replay_phase(
     let mut deletes = 0u64;
     let mut hot_edits = 0u64;
     let mut cold_edits = 0u64;
+    let mut poll_cycles = 0u64;
+    let mut ingest_us = 0u64;
+    let mut reorganize_us = 0u64;
 
     for (i, op) in ops.iter().enumerate() {
         match op {
@@ -431,16 +531,28 @@ fn replay_phase(
 
         // Daemon poll: flush accumulated events every poll_interval_ops operations.
         if (i + 1) % config.poll_interval_ops == 0 {
+            let t0 = Instant::now();
             policy.ingest(&events);
+            let t1 = Instant::now();
             policy.reorganize().map_err(|e| anyhow::anyhow!("{}", e))?;
+            let t2 = Instant::now();
+            ingest_us += (t1 - t0).as_micros() as u64;
+            reorganize_us += (t2 - t1).as_micros() as u64;
+            poll_cycles += 1;
             events.clear();
         }
     }
 
     // Final flush for any remaining events.
     if !events.is_empty() {
+        let t0 = Instant::now();
         policy.ingest(&events);
+        let t1 = Instant::now();
         policy.reorganize().map_err(|e| anyhow::anyhow!("{}", e))?;
+        let t2 = Instant::now();
+        ingest_us += (t1 - t0).as_micros() as u64;
+        reorganize_us += (t2 - t1).as_micros() as u64;
+        poll_cycles += 1;
     }
 
     Ok(PhaseResult {
@@ -448,6 +560,9 @@ fn replay_phase(
         deletes,
         hot_edits,
         cold_edits,
+        poll_cycles,
+        ingest_us,
+        reorganize_us,
     })
 }
 
@@ -457,13 +572,29 @@ enum OpType {
     Edit,
 }
 
-fn choose_op_type<R: Rng>(config: &WorkloadConfig, live_count: usize, rng: &mut R) -> OpType {
+fn choose_op_type_params<R: Rng>(params: &PhaseParams, live_count: usize, rng: &mut R) -> OpType {
+    choose_op_type_raw(
+        params.create_pct,
+        params.delete_pct,
+        params.edit_pct,
+        live_count,
+        rng,
+    )
+}
+
+fn choose_op_type_raw<R: Rng>(
+    create_pct: u8,
+    delete_pct: u8,
+    edit_pct: u8,
+    live_count: usize,
+    rng: &mut R,
+) -> OpType {
     if live_count == 0 {
         return OpType::Create;
     }
-    let c = config.create_pct as u32;
-    let d = config.delete_pct as u32;
-    let e = config.edit_pct as u32;
+    let c = create_pct as u32;
+    let d = delete_pct as u32;
+    let e = edit_pct as u32;
     let total = c + d + e;
     if total == 0 {
         return OpType::Create;

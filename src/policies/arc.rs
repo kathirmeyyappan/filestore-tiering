@@ -544,6 +544,11 @@ impl PolicyEngine for ArcPolicy {
         let mut promoted = 0u32;
         let mut evicted_room = 0u32;
 
+        // Track files newly inserted into T1 THIS cycle. A file just entering T1
+        // should not be promoted to T2 on a duplicate touch in the same batch
+        // (e.g. the Create+Modify pair emitted for every new file creation).
+        let mut added_to_t1_this_cycle: HashSet<PathBuf> = HashSet::new();
+
         for (mut path, _) in touches.drain(..) {
             // Map cold paths to logical hot paths
             if path.starts_with(&cold_abs) {
@@ -579,9 +584,17 @@ impl PolicyEngine for ArcPolicy {
             }
 
             // ── Case 1: Cache hit in T1 → promote to MRU of T2 ──
+            // Skip if this file was just added to T1 in this same cycle (e.g. from
+            // a Create+Modify pair); a single creation is not a "re-access".
             if Self::find_in(&self.t1, &path).is_some() {
-                Self::remove_from(&mut self.t1, &path);
-                self.t2.push_front(path);
+                if added_to_t1_this_cycle.contains(&path) {
+                    // Duplicate touch from same batch — just bump MRU within T1.
+                    Self::remove_from(&mut self.t1, &path);
+                    self.t1.push_front(path);
+                } else {
+                    Self::remove_from(&mut self.t1, &path);
+                    self.t2.push_front(path);
+                }
                 continue;
             }
 
@@ -601,7 +614,7 @@ impl PolicyEngine for ArcPolicy {
                     std::cmp::max(1, self.b2.len() / self.b1.len())
                 };
                 let c = self.t1.len() + self.t2.len();
-                self.p = std::cmp::min(c.saturating_add(1), self.p.saturating_add(delta));
+                self.p = std::cmp::min(c, self.p.saturating_add(delta));
 
                 let need = Self::symlink_target_size(&path);
                 // REPLACE loop: evict until we have room
@@ -652,7 +665,8 @@ impl PolicyEngine for ArcPolicy {
                 continue;
             }
 
-            // ── Case 5: Symlink not in any ghost list (untracked cold file) → promote to T2 ──
+            // ── Case 5: Symlink not in any ghost list (untracked cold file) → promote to T1 ──
+            // Paper Case IV: complete miss (not in T1∪T2∪B1∪B2) always enters T1.
             if meta.file_type().is_symlink() {
                 let need = Self::symlink_target_size(&path);
                 while self.tier_state.hot_bytes_left() < need {
@@ -664,7 +678,8 @@ impl PolicyEngine for ArcPolicy {
                 }
                 if self.tier_state.hot_bytes_left() >= need {
                     self.promote(&path, &hot_root)?;
-                    self.t2.push_front(path);
+                    self.t1.push_front(path.clone());
+                    added_to_t1_this_cycle.insert(path);
                     promoted += 1;
                 }
                 self.clamp_p();
@@ -678,6 +693,7 @@ impl PolicyEngine for ArcPolicy {
                     self.hot_sizes.insert(path.clone(), sz);
                     new_in_hot += 1;
                 }
+                added_to_t1_this_cycle.insert(path.clone());
                 self.t1.push_front(path);
             }
         }
