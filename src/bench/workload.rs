@@ -258,12 +258,14 @@ pub struct BenchResult {
 }
 
 /// CSV header matching `to_csv_row`.
-pub const CSV_HEADER: &str = "policy,warmup_ops,measure_ops,poll_interval_ops,depth,hot_cap,\
-min_file_size,max_file_size,create_pct,delete_pct,edit_pct,skew,\
-policy_params,\
-total_creates,total_deletes,total_edits,hot_edits,cold_edits,hit_rate,\
+/// Performance metrics appear first so the most important columns are immediately
+/// visible in any spreadsheet or CSV viewer without scrolling right.
+pub const CSV_HEADER: &str = "policy,\
+hit_rate,hot_edits,cold_edits,total_edits,\
 promotions,demotions,demotions_tier0,bytes_wr_hot,bytes_wr_cold0,\
-poll_cycles,ingest_us,reorganize_us";
+total_creates,total_deletes,poll_cycles,ingest_us,reorganize_us,\
+warmup_ops,measure_ops,poll_interval_ops,depth,hot_cap,\
+min_file_size,max_file_size,create_pct,delete_pct,edit_pct,skew,policy_params";
 
 impl BenchResult {
     pub fn to_csv_row(&self) -> String {
@@ -279,9 +281,29 @@ impl BenchResult {
             pairs.sort();
             pairs.join(";")
         };
+        // Column order mirrors CSV_HEADER: performance metrics first, config params last.
         format!(
-            "{},{},{},{},{},{},{},{},{},{},{},{:.1},{},{},{},{},{},{},{:.6},{},{},{},{},{},{},{},{}",
+            "{},{:.6},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{:.1},{}",
             self.config.policy,
+            // ── primary metrics ──
+            self.hit_rate,
+            self.hot_edits,
+            self.cold_edits,
+            self.total_edits,
+            // ── daemon I/O activity ──
+            self.promotions,
+            self.demotions,
+            self.demotions_tier0,
+            bw_hot,
+            bw_cold0,
+            // ── workload counts ──
+            self.total_creates,
+            self.total_deletes,
+            // ── timing ──
+            self.poll_cycles,
+            self.ingest_us,
+            self.reorganize_us,
+            // ── config params (for reproducibility) ──
             self.config.warmup_ops,
             self.config.measure_ops,
             self.config.poll_interval_ops,
@@ -294,20 +316,6 @@ impl BenchResult {
             self.config.edit_pct,
             self.config.skew,
             params_str,
-            self.total_creates,
-            self.total_deletes,
-            self.total_edits,
-            self.hot_edits,
-            self.cold_edits,
-            self.hit_rate,
-            self.promotions,
-            self.demotions,
-            self.demotions_tier0,
-            bw_hot,
-            bw_cold0,
-            self.poll_cycles,
-            self.ingest_us,
-            self.reorganize_us,
         )
     }
 
