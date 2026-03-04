@@ -268,7 +268,11 @@ impl DecisionTreePolicy {
             .iter()
             .map(|(raw, _)| self.normalize(raw).to_vec())
             .collect();
-        let labels: Vec<f64> = self.training_samples.iter().map(|(_, label)| *label).collect();
+        let labels: Vec<f64> = self
+            .training_samples
+            .iter()
+            .map(|(_, label)| *label)
+            .collect();
 
         let x = DenseMatrix::from_2d_vec(&rows);
         let params = DecisionTreeRegressorParameters::default()
@@ -557,9 +561,7 @@ impl PolicyEngine for DecisionTreePolicy {
         }
         for (p, sz) in to_drop {
             self.cold_sizes.remove(&p);
-            let rel = p
-                .strip_prefix(&hot_root)
-                .unwrap_or_else(|_| Path::new(""));
+            let rel = p.strip_prefix(&hot_root).unwrap_or_else(|_| Path::new(""));
             let cold_backing = cold.join(rel);
             if fs::metadata(&cold_backing).is_err() {
                 self.tier_state.adjust_cold_bytes(0, sz, 0);
@@ -803,7 +805,10 @@ mod tests {
 
         // Ghost hit should have added a training sample with label=1.0.
         assert!(
-            policy.training_samples.iter().any(|(_, label)| *label == 1.0),
+            policy
+                .training_samples
+                .iter()
+                .any(|(_, label)| *label == 1.0),
             "should have a training sample with label=1.0 from ghost hit"
         );
     }

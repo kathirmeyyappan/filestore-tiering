@@ -480,8 +480,7 @@ impl PolicyEngine for CacheusPolicy {
                     .is_some_and(|h| self.last_modified.contains(h));
 
                 let our_move = matches!(e.kind, FsEventKind::Create | FsEventKind::Remove);
-                let our_symlink_modify =
-                    e.kind == FsEventKind::Modify && in_modified && under_hot;
+                let our_symlink_modify = e.kind == FsEventKind::Modify && in_modified && under_hot;
 
                 if (in_modified && (our_move || our_symlink_modify))
                     || (logical_hot_in_modified && our_move)
@@ -515,9 +514,7 @@ impl PolicyEngine for CacheusPolicy {
         }
         for (p, sz) in to_drop {
             self.cold_sizes.remove(&p);
-            let rel = p
-                .strip_prefix(&hot_root)
-                .unwrap_or_else(|_| Path::new(""));
+            let rel = p.strip_prefix(&hot_root).unwrap_or_else(|_| Path::new(""));
             let cold_backing = cold.join(rel);
             if fs::metadata(&cold_backing).is_err() {
                 self.tier_state.adjust_cold_bytes(0, sz, 0);

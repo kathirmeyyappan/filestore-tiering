@@ -30,7 +30,15 @@ use filestore_tiering::bench::{
     BenchResult, CSV_HEADER, WorkloadConfig, WorkloadPhase, generate_trace, run_with_trace,
 };
 
-const POLICIES: &[&str] = &["basic_lru", "arc", "lfu", "lru_2q", "lecar", "cacheus", "decision_tree"];
+const POLICIES: &[&str] = &[
+    "basic_lru",
+    "arc",
+    "lfu",
+    "lru_2q",
+    "lecar",
+    "cacheus",
+    "decision_tree",
+];
 
 fn base_config() -> WorkloadConfig {
     WorkloadConfig {

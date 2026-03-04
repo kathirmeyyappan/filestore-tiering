@@ -156,8 +156,7 @@ impl LeCarPolicy {
         self.lru_queue.push_front(path.clone());
         self.freqs.insert(path.clone(), 1);
         self.seq_counter = self.seq_counter.wrapping_add(1);
-        self.heap
-            .push(Reverse((1, self.seq_counter, path.clone())));
+        self.heap.push(Reverse((1, self.seq_counter, path.clone())));
         self.logical_time += 1;
     }
 
@@ -498,9 +497,7 @@ impl PolicyEngine for LeCarPolicy {
         }
         for (p, sz) in to_drop {
             self.cold_sizes.remove(&p);
-            let rel = p
-                .strip_prefix(&hot_root)
-                .unwrap_or_else(|_| Path::new(""));
+            let rel = p.strip_prefix(&hot_root).unwrap_or_else(|_| Path::new(""));
             let cold_backing = cold.join(rel);
             if fs::metadata(&cold_backing).is_err() {
                 self.tier_state.adjust_cold_bytes(0, sz, 0);
@@ -769,7 +766,10 @@ mod tests {
         let _total_ghosts = policy.lru_ghost.len() + policy.lfu_ghost.len();
         // Even if LRU==LFU for some evictions (no ghost entry), at least verify
         // the policy works and demotions happened.
-        assert!(policy.total_demotions >= 2, "should have evicted at least 2 files");
+        assert!(
+            policy.total_demotions >= 2,
+            "should have evicted at least 2 files"
+        );
         // Weights should still be near 0.5 since no ghost hits yet.
         assert!(
             (policy.w_lru - 0.5).abs() < 0.4,
