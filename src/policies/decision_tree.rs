@@ -145,12 +145,12 @@ impl DecisionTreePolicy {
     }
 
     fn update_min_max(&mut self, raw: &[f64; NUM_FEATURES]) {
-        for i in 0..NUM_FEATURES {
-            if raw[i] < self.feat_min[i] {
-                self.feat_min[i] = raw[i];
+        for (i, &val) in raw.iter().enumerate() {
+            if val < self.feat_min[i] {
+                self.feat_min[i] = val;
             }
-            if raw[i] > self.feat_max[i] {
-                self.feat_max[i] = raw[i];
+            if val > self.feat_max[i] {
+                self.feat_max[i] = val;
             }
         }
     }
@@ -255,7 +255,7 @@ impl DecisionTreePolicy {
     // ── Tree retraining ──
 
     fn maybe_retrain(&mut self) {
-        if self.eviction_count % self.retrain_interval != 0 {
+        if !self.eviction_count.is_multiple_of(self.retrain_interval) {
             return;
         }
         if self.training_samples.len() < MIN_TRAINING_SAMPLES {
@@ -279,15 +279,12 @@ impl DecisionTreePolicy {
             .with_max_depth(TREE_MAX_DEPTH)
             .with_min_samples_leaf(TREE_MIN_SAMPLES_LEAF);
 
-        match DecisionTreeRegressor::fit(&x, &labels, params) {
-            Ok(new_tree) => {
-                self.tree = Some(new_tree);
-                // Keep most recent half to avoid unbounded growth.
-                let keep = self.training_samples.len() / 2;
-                self.training_samples
-                    .drain(..self.training_samples.len() - keep);
-            }
-            Err(_) => {} // keep old tree
+        if let Ok(new_tree) = DecisionTreeRegressor::fit(&x, &labels, params) {
+            self.tree = Some(new_tree);
+            // Keep most recent half to avoid unbounded growth.
+            let keep = self.training_samples.len() / 2;
+            self.training_samples
+                .drain(..self.training_samples.len() - keep);
         }
     }
 
@@ -308,10 +305,10 @@ impl DecisionTreePolicy {
         self.logical_time += 1;
     }
 
-    fn insert_new_file(&mut self, path: &PathBuf) {
-        self.last_access.insert(path.clone(), self.logical_time);
-        self.access_count.insert(path.clone(), 1);
-        self.inter_access_sum.insert(path.clone(), 0);
+    fn insert_new_file(&mut self, path: &Path) {
+        self.last_access.insert(path.to_path_buf(), self.logical_time);
+        self.access_count.insert(path.to_path_buf(), 1);
+        self.inter_access_sum.insert(path.to_path_buf(), 0);
         self.logical_time += 1;
     }
 

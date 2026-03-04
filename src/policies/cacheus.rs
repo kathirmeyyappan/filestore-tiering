@@ -172,32 +172,32 @@ impl CacheusPolicy {
     }
 
     /// Insert a new file: probation front (SR-LRU), freq=1.0 (CR-LFU).
-    fn insert_new(&mut self, path: &PathBuf) {
-        self.probation.push_front(path.clone());
-        self.in_probation.insert(path.clone());
-        self.cr_freqs.insert(path.clone(), 1.0);
+    fn insert_new(&mut self, path: &Path) {
+        self.probation.push_front(path.to_path_buf());
+        self.in_probation.insert(path.to_path_buf());
+        self.cr_freqs.insert(path.to_path_buf(), 1.0);
         self.logical_time += 1;
     }
 
     /// Insert a promoted file (from ghost hit): protected front (already proven).
-    fn insert_promoted(&mut self, path: &PathBuf) {
-        self.protected.push_front(path.clone());
-        self.in_protected.insert(path.clone());
-        self.cr_freqs.insert(path.clone(), 1.0);
+    fn insert_promoted(&mut self, path: &Path) {
+        self.protected.push_front(path.to_path_buf());
+        self.in_protected.insert(path.to_path_buf());
+        self.cr_freqs.insert(path.to_path_buf(), 1.0);
         self.logical_time += 1;
     }
 
     fn remove_from_tracking(&mut self, path: &PathBuf) {
         self.hot_sizes.remove(path);
-        if self.in_probation.remove(path) {
-            if let Some(pos) = self.probation.iter().position(|p| p == path) {
-                self.probation.remove(pos);
-            }
+        if self.in_probation.remove(path)
+            && let Some(pos) = self.probation.iter().position(|p| p == path)
+        {
+            self.probation.remove(pos);
         }
-        if self.in_protected.remove(path) {
-            if let Some(pos) = self.protected.iter().position(|p| p == path) {
-                self.protected.remove(pos);
-            }
+        if self.in_protected.remove(path)
+            && let Some(pos) = self.protected.iter().position(|p| p == path)
+        {
+            self.protected.remove(pos);
         }
         self.cr_freqs.remove(path);
     }
@@ -270,10 +270,10 @@ impl CacheusPolicy {
 
     // ── Ghost list management ──
 
-    fn add_to_ghost(&mut self, path: &PathBuf, expert: Expert) {
+    fn add_to_ghost(&mut self, path: &Path, expert: Expert) {
         match expert {
             Expert::SrLru => {
-                self.lru_ghost.push_front(path.clone());
+                self.lru_ghost.push_front(path.to_path_buf());
                 while self.lru_ghost.len() > self.ghost_cap {
                     if let Some(old) = self.lru_ghost.pop_back() {
                         self.ghost_evict_time.remove(&old);
@@ -281,7 +281,7 @@ impl CacheusPolicy {
                 }
             }
             Expert::CrLfu => {
-                self.lfu_ghost.push_front(path.clone());
+                self.lfu_ghost.push_front(path.to_path_buf());
                 while self.lfu_ghost.len() > self.ghost_cap {
                     if let Some(old) = self.lfu_ghost.pop_back() {
                         self.ghost_evict_time.remove(&old);
@@ -290,10 +290,10 @@ impl CacheusPolicy {
             }
         }
         self.ghost_evict_time
-            .insert(path.clone(), self.logical_time);
+            .insert(path.to_path_buf(), self.logical_time);
     }
 
-    fn remove_from_ghost(&mut self, path: &PathBuf) -> Option<Expert> {
+    fn remove_from_ghost(&mut self, path: &Path) -> Option<Expert> {
         if let Some(pos) = self.lru_ghost.iter().position(|p| p == path) {
             self.lru_ghost.remove(pos);
             return Some(Expert::SrLru);

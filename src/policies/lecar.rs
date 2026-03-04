@@ -152,11 +152,12 @@ impl LeCarPolicy {
     }
 
     /// Insert a new file into tracking (LRU front, freq=1).
-    fn insert_new(&mut self, path: &PathBuf) {
-        self.lru_queue.push_front(path.clone());
-        self.freqs.insert(path.clone(), 1);
+    fn insert_new(&mut self, path: &Path) {
+        self.lru_queue.push_front(path.to_path_buf());
+        self.freqs.insert(path.to_path_buf(), 1);
         self.seq_counter = self.seq_counter.wrapping_add(1);
-        self.heap.push(Reverse((1, self.seq_counter, path.clone())));
+        self.heap
+            .push(Reverse((1, self.seq_counter, path.to_path_buf())));
         self.logical_time += 1;
     }
 
@@ -200,10 +201,10 @@ impl LeCarPolicy {
 
     // ── Ghost list management ──
 
-    fn add_to_ghost(&mut self, path: &PathBuf, expert: Expert) {
+    fn add_to_ghost(&mut self, path: &Path, expert: Expert) {
         match expert {
             Expert::Lru => {
-                self.lru_ghost.push_front(path.clone());
+                self.lru_ghost.push_front(path.to_path_buf());
                 while self.lru_ghost.len() > self.ghost_cap {
                     if let Some(old) = self.lru_ghost.pop_back() {
                         self.ghost_evict_time.remove(&old);
@@ -211,7 +212,7 @@ impl LeCarPolicy {
                 }
             }
             Expert::Lfu => {
-                self.lfu_ghost.push_front(path.clone());
+                self.lfu_ghost.push_front(path.to_path_buf());
                 while self.lfu_ghost.len() > self.ghost_cap {
                     if let Some(old) = self.lfu_ghost.pop_back() {
                         self.ghost_evict_time.remove(&old);
@@ -220,10 +221,10 @@ impl LeCarPolicy {
             }
         }
         self.ghost_evict_time
-            .insert(path.clone(), self.logical_time);
+            .insert(path.to_path_buf(), self.logical_time);
     }
 
-    fn remove_from_ghost(&mut self, path: &PathBuf) -> Option<Expert> {
+    fn remove_from_ghost(&mut self, path: &Path) -> Option<Expert> {
         if let Some(pos) = self.lru_ghost.iter().position(|p| p == path) {
             self.lru_ghost.remove(pos);
             return Some(Expert::Lru);
