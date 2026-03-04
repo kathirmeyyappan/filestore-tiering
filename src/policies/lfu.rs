@@ -232,16 +232,6 @@ impl PolicyEngine for LfuPolicy {
                 if (in_modified && (our_move || our_symlink_modify))
                     || (logical_hot_in_modified && our_move)
                 {
-                    // Exception: Create on a path we evicted (now in last_modified) can be a
-                    // rename: symlink was moved to this path, so path exists as symlink — count as touch so we promote.
-                    if e.kind == FsEventKind::Create
-                        && under_hot
-                        && fs::symlink_metadata(&p)
-                            .map(|m| m.file_type().is_symlink())
-                            .unwrap_or(false)
-                    {
-                        return true;
-                    }
                     return false;
                 }
                 true
@@ -306,6 +296,13 @@ impl PolicyEngine for LfuPolicy {
                     self.hot_sizes.insert(p.clone(), sz);
                     self.bump_freq(&p);
                 }
+            }
+            let found: u64 = self.hot_sizes.values().sum();
+            let current = self.tier_state.hot_bytes();
+            if found > current {
+                self.tier_state.adjust_hot_bytes(0, found - current);
+            } else if current > found {
+                self.tier_state.adjust_hot_bytes(current - found, 0);
             }
             policy_log::log_initial_fill("lfu", self.hot_sizes.len(), self.tier_state.hot_bytes());
         }

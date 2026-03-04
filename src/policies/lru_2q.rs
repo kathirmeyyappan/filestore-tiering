@@ -329,15 +329,6 @@ impl PolicyEngine for Lru2QPolicy {
                 if (in_modified && (our_move || our_symlink_modify))
                     || (logical_hot_in_modified && our_move)
                 {
-                    // Exception: Create on an evicted path (now a symlink) is a rename — count as touch.
-                    if e.kind == FsEventKind::Create
-                        && under_hot
-                        && fs::symlink_metadata(&p)
-                            .map(|m| m.file_type().is_symlink())
-                            .unwrap_or(false)
-                    {
-                        return true;
-                    }
                     return false;
                 }
                 true
@@ -411,6 +402,13 @@ impl PolicyEngine for Lru2QPolicy {
                     self.in_a1in.insert(p.clone());
                     self.a1_in_bytes = self.a1_in_bytes.saturating_add(sz);
                 }
+            }
+            let found: u64 = self.hot_sizes.values().sum();
+            let current = self.tier_state.hot_bytes();
+            if found > current {
+                self.tier_state.adjust_hot_bytes(0, found - current);
+            } else if current > found {
+                self.tier_state.adjust_hot_bytes(current - found, 0);
             }
             policy_log::log_initial_fill(
                 "lru_2q",

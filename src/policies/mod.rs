@@ -19,6 +19,9 @@
 
 pub mod arc;
 pub mod basic_lru;
+pub mod cacheus;
+pub mod decision_tree;
 pub mod dummy;
+pub mod lecar;
 pub mod lfu;
 pub mod lru_2q;
