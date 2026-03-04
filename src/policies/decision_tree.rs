@@ -5,7 +5,7 @@
 //! A ghost list tracks evicted files; ghost hits/expires generate training samples
 //! that periodically retrain the tree.
 //!
-//! Reference: Inspired by KML (Vietri et al.) and LRB (Song et al.).
+//! Reference: Inspired by LRB (Song et al., NSDI '20).
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
@@ -22,10 +22,6 @@ use crate::policy_log;
 
 // ── Constants ──
 
-const RETRAIN_INTERVAL: u64 = 50;
-const MIN_TRAINING_SAMPLES: usize = 20;
-const TREE_MAX_DEPTH: u16 = 4;
-const TREE_MIN_SAMPLES_LEAF: usize = 2;
 const NUM_FEATURES: usize = 4;
 
 // ── Ghost entry ──
@@ -75,6 +71,9 @@ pub struct DecisionTreePolicy {
     training_samples: Vec<([f64; NUM_FEATURES], f64)>, // (features, label)
     eviction_count: u64,
     retrain_interval: u64,
+    min_training_samples: usize,
+    tree_max_depth: u16,
+    tree_min_samples_leaf: usize,
 
     logical_time: u64,
     total_promotions: u64,
@@ -96,6 +95,16 @@ impl std::fmt::Debug for DecisionTreePolicy {
 
 impl DecisionTreePolicy {
     pub fn new(tier_state: TierState) -> Self {
+        Self::new_with_params(tier_state, &HashMap::new())
+    }
+
+    pub fn new_with_params(tier_state: TierState, params: &HashMap<String, f64>) -> Self {
+        let retrain_interval = params.get("retrain_interval").copied().unwrap_or(50.0) as u64;
+        let min_training_samples =
+            params.get("min_training_samples").copied().unwrap_or(20.0) as usize;
+        let tree_max_depth = params.get("tree_max_depth").copied().unwrap_or(4.0) as u16;
+        let tree_min_samples_leaf =
+            params.get("tree_min_samples_leaf").copied().unwrap_or(2.0) as usize;
         Self {
             tier_state,
             hot_sizes: HashMap::new(),
@@ -117,7 +126,10 @@ impl DecisionTreePolicy {
             ghost_cap: 16, // recalculated on first fill
             training_samples: Vec::new(),
             eviction_count: 0,
-            retrain_interval: RETRAIN_INTERVAL,
+            retrain_interval,
+            min_training_samples,
+            tree_max_depth,
+            tree_min_samples_leaf,
 
             logical_time: 0,
             total_promotions: 0,
@@ -258,7 +270,7 @@ impl DecisionTreePolicy {
         if !self.eviction_count.is_multiple_of(self.retrain_interval) {
             return;
         }
-        if self.training_samples.len() < MIN_TRAINING_SAMPLES {
+        if self.training_samples.len() < self.min_training_samples {
             return;
         }
 
@@ -276,8 +288,8 @@ impl DecisionTreePolicy {
 
         let x = DenseMatrix::from_2d_vec(&rows);
         let params = DecisionTreeRegressorParameters::default()
-            .with_max_depth(TREE_MAX_DEPTH)
-            .with_min_samples_leaf(TREE_MIN_SAMPLES_LEAF);
+            .with_max_depth(self.tree_max_depth)
+            .with_min_samples_leaf(self.tree_min_samples_leaf);
 
         if let Ok(new_tree) = DecisionTreeRegressor::fit(&x, &labels, params) {
             self.tree = Some(new_tree);
@@ -839,7 +851,7 @@ mod tests {
         assert!(policy.tree.is_none());
 
         // Set eviction count to trigger retrain.
-        policy.eviction_count = RETRAIN_INTERVAL;
+        policy.eviction_count = policy.retrain_interval;
         policy.maybe_retrain();
 
         assert!(

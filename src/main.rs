@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
@@ -32,6 +33,11 @@ struct Cli {
     #[arg(long, default_value = "dummy")]
     policy: String,
 
+    /// Per-policy tunable parameter (repeatable). Format: key=value.
+    /// Example: --policy-param learning_rate=0.3 --policy-param w_lru=0.7
+    #[arg(long = "policy-param", num_args = 1)]
+    policy_params: Vec<String>,
+
     #[arg(short, long, default_value_t = 5)]
     interval: u64,
 }
@@ -55,12 +61,26 @@ fn main() -> Result<()> {
         .map(|b| format_capacity(*b))
         .collect::<Vec<_>>()
         .join(", ");
+
+    let mut policy_params = HashMap::new();
+    for s in &cli.policy_params {
+        if let Some((k, v)) = s.split_once('=') {
+            let val: f64 = v.parse().map_err(|_| {
+                anyhow::anyhow!("invalid policy-param value (expected float): {}", s)
+            })?;
+            policy_params.insert(k.to_string(), val);
+        } else {
+            anyhow::bail!("malformed policy-param (expected key=value): {}", s);
+        }
+    }
+
     let mut policy_engine = make_policy(
         &cli.policy,
         &cli.hot_storage,
         &cli.cold_storage,
         cli.hot_capacity,
         cold_caps,
+        &policy_params,
     )?;
 
     let watch_dirs: Vec<PathBuf> = std::iter::once(cli.hot_storage.clone())

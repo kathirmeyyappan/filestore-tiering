@@ -33,6 +33,7 @@
 //!   (hot = promotions, cold-i = demotions to tier i). Measures I/O cost of
 //!   achieving the observed placement.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime};
@@ -74,6 +75,9 @@ pub struct WorkloadConfig {
     /// so they sum to 1.0. When empty, the top-level parameters are used
     /// throughout (single-phase backward-compatible behavior).
     pub phases: Vec<WorkloadPhase>,
+    /// Per-policy tunable parameters (e.g. learning_rate, a1in_fraction).
+    /// Each policy extracts what it recognizes; unknown keys are ignored.
+    pub policy_params: HashMap<String, f64>,
 }
 
 /// A phase within a multi-phase workload trace. Overrides the per-op
@@ -256,6 +260,7 @@ pub struct BenchResult {
 /// CSV header matching `to_csv_row`.
 pub const CSV_HEADER: &str = "policy,warmup_ops,measure_ops,poll_interval_ops,depth,hot_cap,\
 min_file_size,max_file_size,create_pct,delete_pct,edit_pct,skew,\
+policy_params,\
 total_creates,total_deletes,total_edits,hot_edits,cold_edits,hit_rate,\
 promotions,demotions,demotions_tier0,bytes_wr_hot,bytes_wr_cold0,\
 poll_cycles,ingest_us,reorganize_us";
@@ -264,8 +269,18 @@ impl BenchResult {
     pub fn to_csv_row(&self) -> String {
         let bw_hot = self.bytes_written_to_tier.first().copied().unwrap_or(0);
         let bw_cold0 = self.bytes_written_to_tier.get(1).copied().unwrap_or(0);
+        let params_str = {
+            let mut pairs: Vec<_> = self
+                .config
+                .policy_params
+                .iter()
+                .map(|(k, v)| format!("{}={}", k, v))
+                .collect();
+            pairs.sort();
+            pairs.join(";")
+        };
         format!(
-            "{},{},{},{},{},{},{},{},{},{},{},{:.1},{},{},{},{},{},{:.6},{},{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{},{},{},{:.1},{},{},{},{},{},{},{:.6},{},{},{},{},{},{},{},{}",
             self.config.policy,
             self.config.warmup_ops,
             self.config.measure_ops,
@@ -278,6 +293,7 @@ impl BenchResult {
             self.config.delete_pct,
             self.config.edit_pct,
             self.config.skew,
+            params_str,
             self.total_creates,
             self.total_deletes,
             self.total_edits,
@@ -372,6 +388,7 @@ pub fn run_with_trace(config: &WorkloadConfig, trace: &WorkloadTrace) -> Result<
         std::slice::from_ref(&cold_path),
         config.hot_capacity,
         vec![u64::MAX],
+        &config.policy_params,
     )?;
 
     let now = SystemTime::now();

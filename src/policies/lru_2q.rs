@@ -48,14 +48,14 @@ fn canonical(path: &Path) -> PathBuf {
     })
 }
 
-/// Fraction of hot_capacity reserved for the probationary A1in queue.
-/// The original 2Q paper suggests 25%; this gives Am the majority of the capacity
-/// so the stable hot set has maximum room.
-const A1IN_FRACTION: f64 = 0.25;
-
 #[derive(Debug)]
 pub struct Lru2QPolicy {
     pub tier_state: TierState,
+
+    /// Fraction of hot_capacity reserved for the probationary A1in queue.
+    /// The original 2Q paper suggests 25%; this gives Am the majority of the capacity
+    /// so the stable hot set has maximum room.
+    a1in_fraction: f64,
 
     // ── hot-tier queues ───────────────────────────────────────────────────────
     // A1in: FIFO probationary buffer. Front = newest, Back = oldest (evict from back).
@@ -90,8 +90,14 @@ pub struct Lru2QPolicy {
 
 impl Lru2QPolicy {
     pub fn new(tier_state: TierState) -> Self {
+        Self::new_with_params(tier_state, &HashMap::new())
+    }
+
+    pub fn new_with_params(tier_state: TierState, params: &HashMap<String, f64>) -> Self {
+        let a1in_fraction = params.get("a1in_fraction").copied().unwrap_or(0.25);
         Self {
             tier_state,
+            a1in_fraction,
             a1_in: VecDeque::new(),
             in_a1in: HashSet::new(),
             a1_in_bytes: 0,
@@ -145,10 +151,10 @@ impl Lru2QPolicy {
         false
     }
 
-    /// Byte target for A1in: 25% of total hot capacity.
+    /// Byte target for A1in: `a1in_fraction` of total hot capacity.
     fn a1_in_target_bytes(&self) -> u64 {
         let total = self.tier_state.hot_bytes() + self.tier_state.hot_bytes_left();
-        (total as f64 * A1IN_FRACTION) as u64
+        (total as f64 * self.a1in_fraction) as u64
     }
 
     /// Maximum entries in A1out ghost list, scaled to ~2× the number of files that

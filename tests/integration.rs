@@ -10,6 +10,8 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, SystemTime};
 
+use std::collections::HashMap;
+
 use filestore_tiering::policy_engine::{AccessEvent, FsEventKind};
 
 // Path to the built binary. Cargo sets CARGO_BIN_EXE_* when running the test; else default path.
@@ -195,9 +197,10 @@ fn assert_no_oscillation(policy_name: &str) {
     let mut policy = filestore_tiering::daemon::make_policy(
         policy_name,
         &hot_root,
-        &[cold_root.clone()],
+        std::slice::from_ref(&cold_root),
         15,
         vec![u64::MAX],
+        &HashMap::new(),
     )
     .unwrap_or_else(|e| panic!("[{policy_name}] make_policy failed: {e}"));
 
