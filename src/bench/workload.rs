@@ -391,7 +391,7 @@ pub fn run_with_trace(config: &WorkloadConfig, trace: &WorkloadTrace) -> Result<
         &config.policy_params,
     )?;
 
-    let now = SystemTime::now();
+    let start_time = SystemTime::now();
     let mut live: Vec<PathBuf> = Vec::new();
 
     replay_phase(
@@ -400,17 +400,20 @@ pub fn run_with_trace(config: &WorkloadConfig, trace: &WorkloadTrace) -> Result<
         &trace.warmup,
         &mut *policy,
         &mut live,
-        now,
+        start_time,
     )?;
     let stats_pre = policy.stats();
 
+    // Continue timestamps from where warmup left off.
+    let measure_start =
+        start_time + std::time::Duration::from_millis(trace.warmup.len() as u64);
     let phase = replay_phase(
         config,
         &hot_path,
         &trace.measure,
         &mut *policy,
         &mut live,
-        now,
+        measure_start,
     )?;
     let stats_post = policy.stats();
 
@@ -488,7 +491,7 @@ fn replay_phase(
     ops: &[WorkloadOp],
     policy: &mut dyn PolicyEngine,
     live: &mut Vec<PathBuf>,
-    now: SystemTime,
+    start_time: SystemTime,
 ) -> Result<PhaseResult> {
     let mut events: Vec<AccessEvent> = Vec::new();
     let mut creates = 0u64;
@@ -500,6 +503,9 @@ fn replay_phase(
     let mut reorganize_us = 0u64;
 
     for (i, op) in ops.iter().enumerate() {
+        // Each operation gets a distinct timestamp (1ms apart) so that
+        // policies with time-based features see meaningful inter-access gaps.
+        let event_time = start_time + std::time::Duration::from_millis(i as u64);
         match op {
             WorkloadOp::Create { file_id, size } => {
                 creates += 1;
@@ -509,12 +515,12 @@ fn replay_phase(
                 events.push(AccessEvent {
                     path: path.clone(),
                     kind: FsEventKind::Create,
-                    timestamp: now,
+                    timestamp: event_time,
                 });
                 events.push(AccessEvent {
                     path,
                     kind: FsEventKind::Modify,
-                    timestamp: now,
+                    timestamp: event_time,
                 });
             }
             WorkloadOp::Delete { live_idx } => {
@@ -525,7 +531,7 @@ fn replay_phase(
                 events.push(AccessEvent {
                     path,
                     kind: FsEventKind::Remove,
-                    timestamp: now,
+                    timestamp: event_time,
                 });
             }
             WorkloadOp::Edit { live_idx, size } => {
@@ -540,7 +546,7 @@ fn replay_phase(
                     events.push(AccessEvent {
                         path: path.clone(),
                         kind: FsEventKind::Modify,
-                        timestamp: now,
+                        timestamp: event_time,
                     });
                 }
             }
