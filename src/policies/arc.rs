@@ -168,12 +168,12 @@ impl ArcPolicy {
                 .strip_prefix(hot_root)
                 .unwrap_or_else(|_| Path::new(""));
             let cold_path = cold.join(rel);
-            let sz = self.tier_state.move_to_tier(&victim, cold)?;
+            self.tier_state.move_to_tier(&victim, cold)?;
+            let sz = self.hot_sizes.remove(&victim).unwrap_or(0);
             if sz > 0 {
                 self.tier_state.adjust_hot_bytes(sz, 0);
                 self.tier_state.adjust_cold_bytes(0, 0, sz);
             }
-            let sz = self.hot_sizes.remove(&victim).unwrap_or(sz);
             self.cold_sizes.insert(victim.clone(), sz);
             self.ghost_sizes.insert(victim.clone(), sz);
             self.last_modified.insert(canonical(&victim));
@@ -455,14 +455,6 @@ impl PolicyEngine for ArcPolicy {
                 if (in_modified && (our_move || our_symlink_modify))
                     || (logical_hot_in_modified && our_move)
                 {
-                    if e.kind == FsEventKind::Create
-                        && under_hot
-                        && fs::symlink_metadata(&p)
-                            .map(|m| m.file_type().is_symlink())
-                            .unwrap_or(false)
-                    {
-                        return true;
-                    }
                     return false;
                 }
                 true
@@ -529,8 +521,15 @@ impl PolicyEngine for ArcPolicy {
                     && let Ok(sz) = fs::metadata(&p).map(|m| m.len())
                 {
                     self.hot_sizes.insert(p.clone(), sz);
+                    self.t1.push_back(p);
                 }
-                self.t1.push_back(p);
+            }
+            let found: u64 = self.hot_sizes.values().sum();
+            let current = self.tier_state.hot_bytes();
+            if found > current {
+                self.tier_state.adjust_hot_bytes(0, found - current);
+            } else if current > found {
+                self.tier_state.adjust_hot_bytes(current - found, 0);
             }
             policy_log::log_initial_fill("arc", self.t1.len(), self.tier_state.hot_bytes());
         }

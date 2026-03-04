@@ -50,6 +50,13 @@ pub fn make_policy(
                 .map_err(to_err)?;
             Ok(Box::new(crate::policies::arc::ArcPolicy::new(tier_state)))
         }
+        "lecar" => {
+            crate::policies::lecar::LeCarPolicy::validate_config(hot_storage, cold_storage)
+                .map_err(to_err)?;
+            Ok(Box::new(crate::policies::lecar::LeCarPolicy::new(
+                tier_state,
+            )))
+        }
         "lfu" => {
             crate::policies::lfu::LfuPolicy::validate_config(hot_storage, cold_storage)
                 .map_err(to_err)?;
@@ -61,6 +68,23 @@ pub fn make_policy(
             Ok(Box::new(crate::policies::lru_2q::Lru2QPolicy::new(
                 tier_state,
             )))
+        }
+        "cacheus" => {
+            crate::policies::cacheus::CacheusPolicy::validate_config(hot_storage, cold_storage)
+                .map_err(to_err)?;
+            Ok(Box::new(crate::policies::cacheus::CacheusPolicy::new(
+                tier_state,
+            )))
+        }
+        "decision_tree" => {
+            crate::policies::decision_tree::DecisionTreePolicy::validate_config(
+                hot_storage,
+                cold_storage,
+            )
+            .map_err(to_err)?;
+            Ok(Box::new(
+                crate::policies::decision_tree::DecisionTreePolicy::new(tier_state),
+            ))
         }
         "dummy" => {
             crate::policies::dummy::DummyPolicy::validate_config(hot_storage, cold_storage)
