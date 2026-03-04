@@ -306,7 +306,8 @@ impl DecisionTreePolicy {
     }
 
     fn insert_new_file(&mut self, path: &Path) {
-        self.last_access.insert(path.to_path_buf(), self.logical_time);
+        self.last_access
+            .insert(path.to_path_buf(), self.logical_time);
         self.access_count.insert(path.to_path_buf(), 1);
         self.inter_access_sum.insert(path.to_path_buf(), 0);
         self.logical_time += 1;
