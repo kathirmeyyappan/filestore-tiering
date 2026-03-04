@@ -8,6 +8,7 @@
 # Usage:
 #   ./scripts/bench_big_daddy.sh                         # output: big_daddy_results.csv
 #   ./scripts/bench_big_daddy.sh my_big_results.csv      # custom output file
+#   RUNS=1 ./scripts/bench_big_daddy.sh                  # 1 run by default (single trace per policy)
 #   RUNS=3 ./scripts/bench_big_daddy.sh                  # 3 independent traces per policy
 #   VERBOSE=1 ./scripts/bench_big_daddy.sh               # show stderr from each run
 #
@@ -22,7 +23,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 CSV_OUT="${1:-big_daddy_results.csv}"
-RUNS="${RUNS:-3}"
+RUNS="${RUNS:-1}"
 VERBOSE="${VERBOSE:-}"
 BIN="./target/release/tiering_bench"
 
