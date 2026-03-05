@@ -35,9 +35,17 @@ const POLICIES: &[&str] = &[
     "arc",
     "lfu",
     "lru_2q",
+    "lru_2q_small",
+    "lru_2q_large",
     "lecar",
+    "lecar_fast",
+    "lecar_slow",
     "cacheus",
+    "cacheus_lru_biased",
+    "cacheus_lfu_biased",
     "decision_tree",
+    "decision_tree_deep",
+    "decision_tree_fast",
 ];
 
 fn base_config() -> WorkloadConfig {
