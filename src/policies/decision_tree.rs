@@ -108,8 +108,7 @@ impl DecisionTreePolicy {
         let tree_max_depth = params.get("tree_max_depth").copied().unwrap_or(4.0) as u16;
         let tree_min_samples_leaf =
             params.get("tree_min_samples_leaf").copied().unwrap_or(2.0) as usize;
-        let ghost_cap_min =
-            params.get("ghost_cap_min").copied().unwrap_or(64.0) as usize;
+        let ghost_cap_min = params.get("ghost_cap_min").copied().unwrap_or(64.0) as usize;
         Self {
             tier_state,
             hot_sizes: HashMap::new(),
@@ -156,11 +155,7 @@ impl DecisionTreePolicy {
         let size = self.hot_sizes.get(path).copied().unwrap_or(0) as f64;
         let freq_u64 = self.access_count.get(path).copied().unwrap_or(1);
         let avg_inter_ms = if freq_u64 > 1 {
-            self.inter_access_ms_sum
-                .get(path)
-                .copied()
-                .unwrap_or(0) as f64
-                / (freq_u64 - 1) as f64
+            self.inter_access_ms_sum.get(path).copied().unwrap_or(0) as f64 / (freq_u64 - 1) as f64
         } else {
             // No inter-access data yet; use a large sentinel.
             // Normalization will handle it, and decay prevents permanent distortion.
@@ -349,8 +344,7 @@ impl DecisionTreePolicy {
     fn insert_new_file(&mut self, path: &Path, ts: SystemTime) {
         self.last_access
             .insert(path.to_path_buf(), self.logical_time);
-        self.last_access_time
-            .insert(path.to_path_buf(), ts);
+        self.last_access_time.insert(path.to_path_buf(), ts);
         self.access_count.insert(path.to_path_buf(), 1);
         self.inter_access_ms_sum.insert(path.to_path_buf(), 0);
         self.logical_time += 1;

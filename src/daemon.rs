@@ -141,10 +141,7 @@ pub fn make_policy(
             )
             .map_err(to_err)?;
             Ok(Box::new(
-                crate::policies::decision_tree::DecisionTreePolicy::new_with_params(
-                    tier_state,
-                    &p,
-                ),
+                crate::policies::decision_tree::DecisionTreePolicy::new_with_params(tier_state, &p),
             ))
         }
 

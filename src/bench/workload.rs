@@ -413,8 +413,7 @@ pub fn run_with_trace(config: &WorkloadConfig, trace: &WorkloadTrace) -> Result<
     let stats_pre = policy.stats();
 
     // Continue timestamps from where warmup left off.
-    let measure_start =
-        start_time + std::time::Duration::from_millis(trace.warmup.len() as u64);
+    let measure_start = start_time + std::time::Duration::from_millis(trace.warmup.len() as u64);
     let phase = replay_phase(
         config,
         &hot_path,
