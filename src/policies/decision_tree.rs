@@ -23,6 +23,7 @@ use crate::policy_log;
 // ── Constants ──
 
 const NUM_FEATURES: usize = 4;
+const NORM_DECAY_RATE: f64 = 0.05; // fraction to contract bounds toward center per reorganize
 
 // ── Ghost entry ──
 
@@ -54,8 +55,9 @@ pub struct DecisionTreePolicy {
 
     // Per-file tracking
     last_access: HashMap<PathBuf, u64>,
+    last_access_time: HashMap<PathBuf, SystemTime>,
     access_count: HashMap<PathBuf, u64>,
-    inter_access_sum: HashMap<PathBuf, u64>,
+    inter_access_ms_sum: HashMap<PathBuf, u64>,
 
     // Feature normalization (running min/max)
     feat_min: [f64; NUM_FEATURES],
@@ -68,6 +70,7 @@ pub struct DecisionTreePolicy {
     ghost: VecDeque<GhostEntry>,
     ghost_set: HashSet<PathBuf>,
     ghost_cap: usize,
+    ghost_cap_min: usize,
     training_samples: Vec<([f64; NUM_FEATURES], f64)>, // (features, label)
     eviction_count: u64,
     retrain_interval: u64,
@@ -105,6 +108,7 @@ impl DecisionTreePolicy {
         let tree_max_depth = params.get("tree_max_depth").copied().unwrap_or(4.0) as u16;
         let tree_min_samples_leaf =
             params.get("tree_min_samples_leaf").copied().unwrap_or(2.0) as usize;
+        let ghost_cap_min = params.get("ghost_cap_min").copied().unwrap_or(64.0) as usize;
         Self {
             tier_state,
             hot_sizes: HashMap::new(),
@@ -113,8 +117,9 @@ impl DecisionTreePolicy {
             last_modified: HashSet::new(),
 
             last_access: HashMap::new(),
+            last_access_time: HashMap::new(),
             access_count: HashMap::new(),
-            inter_access_sum: HashMap::new(),
+            inter_access_ms_sum: HashMap::new(),
 
             feat_min: [f64::MAX; NUM_FEATURES],
             feat_max: [f64::MIN; NUM_FEATURES],
@@ -123,7 +128,8 @@ impl DecisionTreePolicy {
 
             ghost: VecDeque::new(),
             ghost_set: HashSet::new(),
-            ghost_cap: 16, // recalculated on first fill
+            ghost_cap: ghost_cap_min,
+            ghost_cap_min,
             training_samples: Vec::new(),
             eviction_count: 0,
             retrain_interval,
@@ -148,12 +154,14 @@ impl DecisionTreePolicy {
         let frequency = self.access_count.get(path).copied().unwrap_or(1) as f64;
         let size = self.hot_sizes.get(path).copied().unwrap_or(0) as f64;
         let freq_u64 = self.access_count.get(path).copied().unwrap_or(1);
-        let avg_inter = if freq_u64 > 1 {
-            self.inter_access_sum.get(path).copied().unwrap_or(0) as f64 / (freq_u64 - 1) as f64
+        let avg_inter_ms = if freq_u64 > 1 {
+            self.inter_access_ms_sum.get(path).copied().unwrap_or(0) as f64 / (freq_u64 - 1) as f64
         } else {
+            // No inter-access data yet; use a large sentinel.
+            // Normalization will handle it, and decay prevents permanent distortion.
             u64::MAX as f64
         };
-        [recency, frequency, size, avg_inter]
+        [recency, frequency, size, avg_inter_ms]
     }
 
     fn update_min_max(&mut self, raw: &[f64; NUM_FEATURES]) {
@@ -300,41 +308,59 @@ impl DecisionTreePolicy {
         }
     }
 
+    // ── Normalization decay ──
+
+    /// Contract normalization bounds toward the center so ancient outliers
+    /// don't permanently compress the feature space.
+    fn decay_normalization(&mut self) {
+        for i in 0..NUM_FEATURES {
+            let mid = (self.feat_min[i] + self.feat_max[i]) / 2.0;
+            self.feat_min[i] += (mid - self.feat_min[i]) * NORM_DECAY_RATE;
+            self.feat_max[i] += (mid - self.feat_max[i]) * NORM_DECAY_RATE;
+        }
+    }
+
     // ── Per-file tracking ──
 
-    fn touch_file(&mut self, path: &Path) {
+    fn touch_file(&mut self, path: &Path, ts: SystemTime) {
         let p = canonical(path);
 
-        // Update inter-access gap.
-        if let Some(&prev_time) = self.last_access.get(&p) {
-            let gap = self.logical_time.saturating_sub(prev_time);
-            *self.inter_access_sum.entry(p.clone()).or_insert(0) += gap;
+        // Update inter-access gap using real time (milliseconds).
+        if let Some(prev_time) = self.last_access_time.get(&p) {
+            let gap_ms = ts
+                .duration_since(*prev_time)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            *self.inter_access_ms_sum.entry(p.clone()).or_insert(0) += gap_ms;
         }
 
         // Update access tracking.
+        self.last_access_time.insert(p.clone(), ts);
         self.last_access.insert(p.clone(), self.logical_time);
         *self.access_count.entry(p).or_insert(0) += 1;
         self.logical_time += 1;
     }
 
-    fn insert_new_file(&mut self, path: &Path) {
+    fn insert_new_file(&mut self, path: &Path, ts: SystemTime) {
         self.last_access
             .insert(path.to_path_buf(), self.logical_time);
+        self.last_access_time.insert(path.to_path_buf(), ts);
         self.access_count.insert(path.to_path_buf(), 1);
-        self.inter_access_sum.insert(path.to_path_buf(), 0);
+        self.inter_access_ms_sum.insert(path.to_path_buf(), 0);
         self.logical_time += 1;
     }
 
     fn remove_from_tracking(&mut self, path: &PathBuf) {
         self.hot_sizes.remove(path);
         self.last_access.remove(path);
+        self.last_access_time.remove(path);
         self.access_count.remove(path);
-        self.inter_access_sum.remove(path);
+        self.inter_access_ms_sum.remove(path);
     }
 
     fn recalc_params(&mut self) {
         let c = self.hot_sizes.len().max(1);
-        self.ghost_cap = 2 * c;
+        self.ghost_cap = (2 * c).max(self.ghost_cap_min);
     }
 
     // ── Filesystem helpers (same pattern as lecar) ──
@@ -502,8 +528,9 @@ impl PolicyEngine for DecisionTreePolicy {
                     if let Some(old) = self.hot_sizes.remove(&path) {
                         self.tier_state.adjust_hot_bytes(old, 0);
                         self.last_access.remove(&path);
+                        self.last_access_time.remove(&path);
                         self.access_count.remove(&path);
-                        self.inter_access_sum.remove(&path);
+                        self.inter_access_ms_sum.remove(&path);
                     }
                 }
                 _ => {}
@@ -593,11 +620,13 @@ impl PolicyEngine for DecisionTreePolicy {
             self.hot_sizes.remove(&p);
             self.tier_state.adjust_hot_bytes(sz, 0);
             self.last_access.remove(&p);
+            self.last_access_time.remove(&p);
             self.access_count.remove(&p);
-            self.inter_access_sum.remove(&p);
+            self.inter_access_ms_sum.remove(&p);
         }
 
         // ── Initial fill ──
+        let fill_time = SystemTime::now();
         if self.hot_sizes.is_empty() && self.access_count.is_empty() {
             for p in Self::list_hot_files(&hot_root, &hot_root)? {
                 if let Ok(meta) = fs::symlink_metadata(&p)
@@ -605,7 +634,7 @@ impl PolicyEngine for DecisionTreePolicy {
                     && let Ok(sz) = fs::metadata(&p).map(|m| m.len())
                 {
                     self.hot_sizes.insert(p.clone(), sz);
-                    self.insert_new_file(&p);
+                    self.insert_new_file(&p, fill_time);
                 }
             }
             self.recalc_params();
@@ -623,7 +652,14 @@ impl PolicyEngine for DecisionTreePolicy {
             );
         }
 
-        // ── Process touches ──
+        // ── Decay normalization bounds before scoring ──
+        self.decay_normalization();
+
+        // ── Two-pass touch processing ──
+        //
+        // Pass 1: Update access tracking for ALL touched files so that
+        //         eviction decisions in pass 2 see fully-updated features.
+        // Pass 2: Perform promotions and evictions.
         self.touched.sort_by(|a, b| a.1.cmp(&b.1));
         let touches = std::mem::take(&mut self.touched);
         let had_touches = !touches.is_empty();
@@ -631,7 +667,11 @@ impl PolicyEngine for DecisionTreePolicy {
         let mut promoted = 0u32;
         let mut evicted_room = 0u32;
 
-        for (mut path, _) in touches {
+        let mut to_promote: Vec<PathBuf> = Vec::new();
+        let mut promote_set: HashSet<PathBuf> = HashSet::new();
+
+        // ── Pass 1: classify touches and update access tracking ──
+        for (mut path, ts) in touches {
             // Map cold paths to logical hot paths.
             if path.starts_with(&cold_abs) {
                 if let Ok(rel) = path.strip_prefix(&cold_abs) {
@@ -651,8 +691,9 @@ impl PolicyEngine for DecisionTreePolicy {
                         self.tier_state.adjust_hot_bytes(old, 0);
                     }
                     self.last_access.remove(&path);
+                    self.last_access_time.remove(&path);
                     self.access_count.remove(&path);
-                    self.inter_access_sum.remove(&path);
+                    self.inter_access_ms_sum.remove(&path);
                     continue;
                 }
             };
@@ -662,36 +703,43 @@ impl PolicyEngine for DecisionTreePolicy {
             }
 
             if meta.file_type().is_symlink() {
-                // ── Cold file touched: check ghost, then promote ──
-                self.process_ghost_hit(&path);
-
-                let need = Self::cold_file_size(&path);
-                while self.tier_state.hot_bytes_left() < need {
-                    let evicted = self.evict_one(&hot_root, &cold, Some(&path))?;
-                    if !evicted {
-                        break;
-                    }
-                    evicted_room += 1;
+                // Cold file: update tracking, queue for promotion (deduped).
+                self.touch_file(&path, ts);
+                if promote_set.insert(path.clone()) {
+                    to_promote.push(path);
                 }
-                if self.tier_state.hot_bytes_left() >= need {
-                    self.promote(&path, &hot_root)?;
-                    self.insert_new_file(&path);
-                    promoted += 1;
-                    self.recalc_params();
+            } else if !self.hot_sizes.contains_key(&path) {
+                // New hot file.
+                if let Ok(sz) = fs::metadata(&path).map(|m| m.len()) {
+                    self.tier_state.adjust_hot_bytes(0, sz);
+                    self.hot_sizes.insert(path.clone(), sz);
+                    new_in_hot += 1;
                 }
+                self.insert_new_file(&path, ts);
+                self.recalc_params();
             } else {
-                // ── Hot file touched (or new regular file) ──
-                if !self.hot_sizes.contains_key(&path) {
-                    if let Ok(sz) = fs::metadata(&path).map(|m| m.len()) {
-                        self.tier_state.adjust_hot_bytes(0, sz);
-                        self.hot_sizes.insert(path.clone(), sz);
-                        new_in_hot += 1;
-                    }
-                    self.insert_new_file(&path);
-                    self.recalc_params();
-                } else {
-                    self.touch_file(&path);
+                // Known hot file.
+                self.touch_file(&path, ts);
+            }
+        }
+
+        // ── Pass 2: promote cold files (features now fully updated) ──
+        for path in to_promote {
+            self.process_ghost_hit(&path);
+
+            let need = Self::cold_file_size(&path);
+            while self.tier_state.hot_bytes_left() < need {
+                let evicted = self.evict_one(&hot_root, &cold, Some(&path))?;
+                if !evicted {
+                    break;
                 }
+                evicted_room += 1;
+            }
+            if self.tier_state.hot_bytes_left() >= need {
+                self.promote(&path, &hot_root)?;
+                // Access tracking already updated in pass 1 — no insert_new_file.
+                promoted += 1;
+                self.recalc_params();
             }
         }
 

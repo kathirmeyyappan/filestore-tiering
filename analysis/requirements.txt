@@ -1,0 +1,5 @@
+pandas>=2.0
+matplotlib>=3.7
+numpy>=1.24
+jupyter>=1.0
+notebook>=7.0

@@ -258,12 +258,14 @@ pub struct BenchResult {
 }
 
 /// CSV header matching `to_csv_row`.
-pub const CSV_HEADER: &str = "policy,warmup_ops,measure_ops,poll_interval_ops,depth,hot_cap,\
-min_file_size,max_file_size,create_pct,delete_pct,edit_pct,skew,\
-policy_params,\
-total_creates,total_deletes,total_edits,hot_edits,cold_edits,hit_rate,\
+/// Performance metrics appear first so the most important columns are immediately
+/// visible in any spreadsheet or CSV viewer without scrolling right.
+pub const CSV_HEADER: &str = "policy,\
+hit_rate,hot_edits,cold_edits,total_edits,\
 promotions,demotions,demotions_tier0,bytes_wr_hot,bytes_wr_cold0,\
-poll_cycles,ingest_us,reorganize_us";
+total_creates,total_deletes,poll_cycles,ingest_us,reorganize_us,\
+warmup_ops,measure_ops,poll_interval_ops,depth,hot_cap,\
+min_file_size,max_file_size,create_pct,delete_pct,edit_pct,skew,policy_params";
 
 impl BenchResult {
     pub fn to_csv_row(&self) -> String {
@@ -279,9 +281,29 @@ impl BenchResult {
             pairs.sort();
             pairs.join(";")
         };
+        // Column order mirrors CSV_HEADER: performance metrics first, config params last.
         format!(
-            "{},{},{},{},{},{},{},{},{},{},{},{:.1},{},{},{},{},{},{},{:.6},{},{},{},{},{},{},{},{}",
+            "{},{:.6},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{:.1},{}",
             self.config.policy,
+            // ── primary metrics ──
+            self.hit_rate,
+            self.hot_edits,
+            self.cold_edits,
+            self.total_edits,
+            // ── daemon I/O activity ──
+            self.promotions,
+            self.demotions,
+            self.demotions_tier0,
+            bw_hot,
+            bw_cold0,
+            // ── workload counts ──
+            self.total_creates,
+            self.total_deletes,
+            // ── timing ──
+            self.poll_cycles,
+            self.ingest_us,
+            self.reorganize_us,
+            // ── config params (for reproducibility) ──
             self.config.warmup_ops,
             self.config.measure_ops,
             self.config.poll_interval_ops,
@@ -294,20 +316,6 @@ impl BenchResult {
             self.config.edit_pct,
             self.config.skew,
             params_str,
-            self.total_creates,
-            self.total_deletes,
-            self.total_edits,
-            self.hot_edits,
-            self.cold_edits,
-            self.hit_rate,
-            self.promotions,
-            self.demotions,
-            self.demotions_tier0,
-            bw_hot,
-            bw_cold0,
-            self.poll_cycles,
-            self.ingest_us,
-            self.reorganize_us,
         )
     }
 
@@ -391,7 +399,7 @@ pub fn run_with_trace(config: &WorkloadConfig, trace: &WorkloadTrace) -> Result<
         &config.policy_params,
     )?;
 
-    let now = SystemTime::now();
+    let start_time = SystemTime::now();
     let mut live: Vec<PathBuf> = Vec::new();
 
     replay_phase(
@@ -400,17 +408,19 @@ pub fn run_with_trace(config: &WorkloadConfig, trace: &WorkloadTrace) -> Result<
         &trace.warmup,
         &mut *policy,
         &mut live,
-        now,
+        start_time,
     )?;
     let stats_pre = policy.stats();
 
+    // Continue timestamps from where warmup left off.
+    let measure_start = start_time + std::time::Duration::from_millis(trace.warmup.len() as u64);
     let phase = replay_phase(
         config,
         &hot_path,
         &trace.measure,
         &mut *policy,
         &mut live,
-        now,
+        measure_start,
     )?;
     let stats_post = policy.stats();
 
@@ -488,7 +498,7 @@ fn replay_phase(
     ops: &[WorkloadOp],
     policy: &mut dyn PolicyEngine,
     live: &mut Vec<PathBuf>,
-    now: SystemTime,
+    start_time: SystemTime,
 ) -> Result<PhaseResult> {
     let mut events: Vec<AccessEvent> = Vec::new();
     let mut creates = 0u64;
@@ -500,6 +510,9 @@ fn replay_phase(
     let mut reorganize_us = 0u64;
 
     for (i, op) in ops.iter().enumerate() {
+        // Each operation gets a distinct timestamp (1ms apart) so that
+        // policies with time-based features see meaningful inter-access gaps.
+        let event_time = start_time + std::time::Duration::from_millis(i as u64);
         match op {
             WorkloadOp::Create { file_id, size } => {
                 creates += 1;
@@ -509,12 +522,12 @@ fn replay_phase(
                 events.push(AccessEvent {
                     path: path.clone(),
                     kind: FsEventKind::Create,
-                    timestamp: now,
+                    timestamp: event_time,
                 });
                 events.push(AccessEvent {
                     path,
                     kind: FsEventKind::Modify,
-                    timestamp: now,
+                    timestamp: event_time,
                 });
             }
             WorkloadOp::Delete { live_idx } => {
@@ -525,7 +538,7 @@ fn replay_phase(
                 events.push(AccessEvent {
                     path,
                     kind: FsEventKind::Remove,
-                    timestamp: now,
+                    timestamp: event_time,
                 });
             }
             WorkloadOp::Edit { live_idx, size } => {
@@ -540,7 +553,7 @@ fn replay_phase(
                     events.push(AccessEvent {
                         path: path.clone(),
                         kind: FsEventKind::Modify,
-                        timestamp: now,
+                        timestamp: event_time,
                     });
                 }
             }

@@ -21,6 +21,9 @@ pub fn ensure_dir_exists(path: &std::path::Path, name: &str) -> Result<()> {
 }
 
 /// Build a policy by name. Hot/cold paths are canonicalized; tier state is initialized from disk.
+///
+/// Named variants (e.g. `lru_2q_small`) are aliases that pre-populate specific
+/// `policy_params` defaults. Explicitly passed `--policy-param` values always win.
 pub fn make_policy(
     name: &str,
     hot_storage: &std::path::Path,
@@ -39,6 +42,16 @@ pub fn make_policy(
         TierState::new(hot_root.clone(), cold_roots, hot_capacity, cold_capacities);
     tier_state.init_bytes().map_err(to_err)?;
 
+    // Merge variant-specific defaults into the caller-supplied params map.
+    // Caller-supplied values (--policy-param) always take precedence.
+    let with_defaults = |defaults: &[(&str, f64)]| -> HashMap<String, f64> {
+        let mut p = policy_params.clone();
+        for &(k, v) in defaults {
+            p.entry(k.to_string()).or_insert(v);
+        }
+        p
+    };
+
     match name {
         "basic_lru" => {
             crate::policies::basic_lru::BasicLruPolicy::validate_config(hot_storage, cold_storage)
@@ -52,45 +65,86 @@ pub fn make_policy(
                 .map_err(to_err)?;
             Ok(Box::new(crate::policies::arc::ArcPolicy::new(tier_state)))
         }
-        "lecar" => {
-            crate::policies::lecar::LeCarPolicy::validate_config(hot_storage, cold_storage)
-                .map_err(to_err)?;
-            Ok(Box::new(
-                crate::policies::lecar::LeCarPolicy::new_with_params(tier_state, policy_params),
-            ))
-        }
         "lfu" => {
             crate::policies::lfu::LfuPolicy::validate_config(hot_storage, cold_storage)
                 .map_err(to_err)?;
             Ok(Box::new(crate::policies::lfu::LfuPolicy::new(tier_state)))
         }
-        "lru_2q" => {
+
+        // ── LRU-2Q variants ──────────────────────────────────────────────────
+        // a1in_fraction controls how much of hot capacity is reserved for the
+        // probationary A1in queue; the remainder goes to the protected Am queue.
+        "lru_2q" | "lru_2q_small" | "lru_2q_large" => {
+            let p = match name {
+                // 10 %: Am dominates — best for workloads with a stable, small hot set.
+                "lru_2q_small" => with_defaults(&[("a1in_fraction", 0.10)]),
+                // 50 %: large probationary buffer — better scan/churn resistance.
+                "lru_2q_large" => with_defaults(&[("a1in_fraction", 0.50)]),
+                _ => policy_params.clone(),
+            };
             crate::policies::lru_2q::Lru2QPolicy::validate_config(hot_storage, cold_storage)
                 .map_err(to_err)?;
             Ok(Box::new(
-                crate::policies::lru_2q::Lru2QPolicy::new_with_params(tier_state, policy_params),
+                crate::policies::lru_2q::Lru2QPolicy::new_with_params(tier_state, &p),
             ))
         }
-        "cacheus" => {
+
+        // ── LeCaR variants ───────────────────────────────────────────────────
+        // learning_rate controls how fast weights shift after a ghost-list hit.
+        // w_lru is the initial weight given to the LRU expert (0.5 = balanced).
+        "lecar" | "lecar_fast" | "lecar_slow" => {
+            let p = match name {
+                // 0.90: reacts aggressively to each ghost hit; good for shifting workloads.
+                "lecar_fast" => with_defaults(&[("learning_rate", 0.90)]),
+                // 0.05: conservative; stabilizes when the optimal expert is clear.
+                "lecar_slow" => with_defaults(&[("learning_rate", 0.05)]),
+                _ => policy_params.clone(),
+            };
+            crate::policies::lecar::LeCarPolicy::validate_config(hot_storage, cold_storage)
+                .map_err(to_err)?;
+            Ok(Box::new(
+                crate::policies::lecar::LeCarPolicy::new_with_params(tier_state, &p),
+            ))
+        }
+
+        // ── CACHEUS variants ─────────────────────────────────────────────────
+        // w_sr_lru is the initial weight for the SR-LRU expert vs CR-LFU.
+        "cacheus" | "cacheus_lru_biased" | "cacheus_lfu_biased" => {
+            let p = match name {
+                // 0.80: starts strongly biased toward scan-resistant LRU.
+                "cacheus_lru_biased" => with_defaults(&[("w_sr_lru", 0.80)]),
+                // 0.20: starts biased toward decaying-frequency LFU.
+                "cacheus_lfu_biased" => with_defaults(&[("w_sr_lru", 0.20)]),
+                _ => policy_params.clone(),
+            };
             crate::policies::cacheus::CacheusPolicy::validate_config(hot_storage, cold_storage)
                 .map_err(to_err)?;
             Ok(Box::new(
-                crate::policies::cacheus::CacheusPolicy::new_with_params(tier_state, policy_params),
+                crate::policies::cacheus::CacheusPolicy::new_with_params(tier_state, &p),
             ))
         }
-        "decision_tree" => {
+
+        // ── Decision-tree variants ───────────────────────────────────────────
+        // retrain_interval: evictions between tree retrains.
+        // tree_max_depth: maximum depth of the regression tree.
+        "decision_tree" | "decision_tree_deep" | "decision_tree_fast" => {
+            let p = match name {
+                // Deeper tree — richer feature splits, more overfitting risk.
+                "decision_tree_deep" => with_defaults(&[("tree_max_depth", 8.0)]),
+                // Retrains 5× more often — adapts faster, higher compute cost.
+                "decision_tree_fast" => with_defaults(&[("retrain_interval", 10.0)]),
+                _ => policy_params.clone(),
+            };
             crate::policies::decision_tree::DecisionTreePolicy::validate_config(
                 hot_storage,
                 cold_storage,
             )
             .map_err(to_err)?;
             Ok(Box::new(
-                crate::policies::decision_tree::DecisionTreePolicy::new_with_params(
-                    tier_state,
-                    policy_params,
-                ),
+                crate::policies::decision_tree::DecisionTreePolicy::new_with_params(tier_state, &p),
             ))
         }
+
         "dummy" => {
             crate::policies::dummy::DummyPolicy::validate_config(hot_storage, cold_storage)
                 .map_err(to_err)?;
